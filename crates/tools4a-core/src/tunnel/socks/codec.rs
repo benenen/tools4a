@@ -10,7 +10,12 @@ use crate::{Error, Result};
 
 pub const SOCKS5_VER: u8 = 0x05;
 pub const METHOD_NO_AUTH: u8 = 0x00;
+pub const METHOD_USERPASS: u8 = 0x02;
 pub const METHOD_NO_ACCEPTABLE: u8 = 0xFF;
+
+/// RFC 1929 username/password subnegotiation version byte.
+pub const USERPASS_VER: u8 = 0x01;
+pub const USERPASS_OK: u8 = 0x00;
 
 pub const CMD_CONNECT: u8 = 0x01;
 
@@ -198,6 +203,197 @@ pub fn write_request_reply(rep: ReplyCode, atyp_echo: u8, host: &str, port: u16)
     out
 }
 
+// ============================================================================
+// Client-side encoders/parsers (used by `Socks5ClientTunnel`).
+// Mirror of the server-side helpers above.
+// ============================================================================
+
+/// Encode the client greeting: `VER NMETHODS METHODS`.
+/// If `userpass` is true, advertise both no-auth (0x00) and user/pass (0x02);
+/// otherwise advertise only no-auth.
+pub fn write_client_greeting(userpass: bool) -> Vec<u8> {
+    if userpass {
+        vec![SOCKS5_VER, 0x02, METHOD_NO_AUTH, METHOD_USERPASS]
+    } else {
+        vec![SOCKS5_VER, 0x01, METHOD_NO_AUTH]
+    }
+}
+
+/// Parse the server's method-selection reply: `VER METHOD`.
+/// Returns the chosen method byte. Caller decides what to do with it:
+/// proceed for 0x00, send auth subneg for 0x02, error on 0xFF.
+pub fn parse_greeting_reply(buf: &[u8]) -> Result<u8> {
+    if buf.len() < 2 {
+        return Err(Error::Service("SOCKS5 greeting reply too short".into()));
+    }
+    if buf[0] != SOCKS5_VER {
+        return Err(Error::Service(format!(
+            "SOCKS5: unsupported version in greeting reply 0x{:02x}",
+            buf[0]
+        )));
+    }
+    if buf[1] == METHOD_NO_ACCEPTABLE {
+        return Err(Error::Service(
+            "SOCKS5 proxy returned no acceptable methods".into(),
+        ));
+    }
+    Ok(buf[1])
+}
+
+/// Encode the RFC 1929 user/password subnegotiation request:
+/// `VER ULEN UNAME PLEN PASSWD`.
+pub fn write_userpass_auth(user: &str, pass: &str) -> Result<Vec<u8>> {
+    if user.len() > 255 {
+        return Err(Error::Config("SOCKS5 username too long (max 255)".into()));
+    }
+    if pass.len() > 255 {
+        return Err(Error::Config("SOCKS5 password too long (max 255)".into()));
+    }
+    let mut out = Vec::with_capacity(3 + user.len() + pass.len());
+    out.push(USERPASS_VER);
+    out.push(user.len() as u8);
+    out.extend_from_slice(user.as_bytes());
+    out.push(pass.len() as u8);
+    out.extend_from_slice(pass.as_bytes());
+    Ok(out)
+}
+
+/// Parse the RFC 1929 reply: `VER STATUS`. Ok iff STATUS == 0x00.
+pub fn parse_userpass_reply(buf: &[u8]) -> Result<()> {
+    if buf.len() < 2 {
+        return Err(Error::Service("SOCKS5 userpass reply too short".into()));
+    }
+    // RFC 1929 says VER for the subneg is 0x01, but some proxies echo 0x05.
+    // Accept either to be lenient — what matters is STATUS.
+    if buf[0] != USERPASS_VER && buf[0] != SOCKS5_VER {
+        return Err(Error::Service(format!(
+            "SOCKS5 userpass reply: unexpected version 0x{:02x}",
+            buf[0]
+        )));
+    }
+    if buf[1] != USERPASS_OK {
+        return Err(Error::Service(format!(
+            "SOCKS5 userpass auth failed (status 0x{:02x})",
+            buf[1]
+        )));
+    }
+    Ok(())
+}
+
+/// Encode the client CONNECT request: `VER CMD RSV ATYP DST.ADDR DST.PORT`.
+/// Picks ATYP=Domain if `host` isn't parseable as an IP literal — this lets
+/// the proxy resolve DNS, equivalent to curl's `--socks5-hostname` mode.
+pub fn write_connect_request(host: &str, port: u16) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(22);
+    out.push(SOCKS5_VER);
+    out.push(CMD_CONNECT);
+    out.push(0x00); // RSV
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            out.push(ATYP_IPV4);
+            out.extend_from_slice(&v4.octets());
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            out.push(ATYP_IPV6);
+            out.extend_from_slice(&v6.octets());
+        }
+        Err(_) => {
+            if host.len() > 255 {
+                return Err(Error::Config(
+                    "SOCKS5 domain too long (max 255 octets)".into(),
+                ));
+            }
+            if host.is_empty() {
+                return Err(Error::Config("SOCKS5 domain must not be empty".into()));
+            }
+            out.push(ATYP_DOMAIN);
+            out.push(host.len() as u8);
+            out.extend_from_slice(host.as_bytes());
+        }
+    }
+    out.extend_from_slice(&port.to_be_bytes());
+    Ok(out)
+}
+
+/// Human name for a SOCKS5 REP byte per RFC 1928 §6.
+fn rep_message(rep: u8) -> &'static str {
+    match rep {
+        0x00 => "succeeded",
+        0x01 => "general failure",
+        0x02 => "connection not allowed by ruleset",
+        0x03 => "network unreachable",
+        0x04 => "host unreachable",
+        0x05 => "connection refused",
+        0x06 => "ttl expired",
+        0x07 => "command not supported",
+        0x08 => "address type not supported",
+        _ => "unknown reply code",
+    }
+}
+
+/// Parse the server's CONNECT reply: `VER REP RSV ATYP BND.ADDR BND.PORT`.
+/// Returns Ok(()) iff REP == 0x00. BND fields are validated for length but
+/// not surfaced — our consumer doesn't need them.
+pub fn parse_connect_reply(buf: &[u8]) -> Result<()> {
+    if buf.len() < 4 {
+        return Err(Error::Service("SOCKS5 connect reply too short".into()));
+    }
+    if buf[0] != SOCKS5_VER {
+        return Err(Error::Service(format!(
+            "SOCKS5: unsupported version in connect reply 0x{:02x}",
+            buf[0]
+        )));
+    }
+    let rep = buf[1];
+    // buf[2] is RSV.
+    let atyp = buf[3];
+    let bnd_addr_len = match atyp {
+        ATYP_IPV4 => 4,
+        ATYP_IPV6 => 16,
+        ATYP_DOMAIN => {
+            if buf.len() < 5 {
+                return Err(Error::Service(
+                    "SOCKS5 connect reply Domain truncated (no len)".into(),
+                ));
+            }
+            1 + buf[4] as usize
+        }
+        other => {
+            return Err(Error::Service(format!(
+                "SOCKS5 connect reply: unsupported ATYP 0x{other:02x}"
+            )));
+        }
+    };
+    let total = 4 + bnd_addr_len + 2;
+    if buf.len() < total {
+        return Err(Error::Service(format!(
+            "SOCKS5 connect reply truncated: need {total} bytes, got {}",
+            buf.len()
+        )));
+    }
+    if rep != 0x00 {
+        return Err(Error::Service(format!(
+            "SOCKS5 connect failed: {} (0x{:02x})",
+            rep_message(rep),
+            rep
+        )));
+    }
+    Ok(())
+}
+
+/// Compute how many ATYP-dependent body bytes follow `VER REP RSV ATYP` in
+/// the connect reply. Returns `None` if the ATYP is unsupported. Used by
+/// `Socks5ClientTunnel` to read the reply incrementally without buffering
+/// a worst-case 262-byte response.
+pub fn connect_reply_body_len(atyp: u8, first_addr_byte: u8) -> Option<usize> {
+    match atyp {
+        ATYP_IPV4 => Some(3 + 2), // 3 remaining IPv4 octets + port
+        ATYP_IPV6 => Some(15 + 2),
+        ATYP_DOMAIN => Some(first_addr_byte as usize + 2), // name body + port
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +510,223 @@ mod tests {
     fn reply_failure_ipv4_zero() {
         let out = write_request_reply(ReplyCode::HostUnreachable, ATYP_IPV4, "0.0.0.0", 0);
         assert_eq!(out, vec![0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+    }
+
+    // ------------------------------------------------------------------
+    // Client-side codec tests (Phase 19)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn client_greeting_no_auth_only() {
+        assert_eq!(write_client_greeting(false), vec![0x05, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn client_greeting_with_userpass() {
+        assert_eq!(write_client_greeting(true), vec![0x05, 0x02, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn parse_greeting_reply_ok_no_auth() {
+        assert_eq!(parse_greeting_reply(&[0x05, 0x00]).unwrap(), 0x00);
+    }
+
+    #[test]
+    fn parse_greeting_reply_ok_userpass() {
+        assert_eq!(parse_greeting_reply(&[0x05, 0x02]).unwrap(), 0x02);
+    }
+
+    #[test]
+    fn parse_greeting_reply_rejects_no_acceptable() {
+        let err = parse_greeting_reply(&[0x05, 0xFF]).unwrap_err();
+        match err {
+            Error::Service(m) => assert!(m.to_lowercase().contains("no acceptable")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_greeting_reply_rejects_short() {
+        parse_greeting_reply(&[]).unwrap_err();
+        parse_greeting_reply(&[0x05]).unwrap_err();
+    }
+
+    #[test]
+    fn parse_greeting_reply_rejects_wrong_version() {
+        let err = parse_greeting_reply(&[0x04, 0x00]).unwrap_err();
+        match err {
+            Error::Service(m) => assert!(m.contains("version")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn userpass_request_encodes_ascii() {
+        let out = write_userpass_auth("user", "pass").unwrap();
+        // VER=0x01 ULEN=4 "user" PLEN=4 "pass"
+        assert_eq!(
+            out,
+            vec![
+                0x01, 0x04, b'u', b's', b'e', b'r', 0x04, b'p', b'a', b's', b's'
+            ]
+        );
+    }
+
+    #[test]
+    fn userpass_request_rejects_too_long_user() {
+        let long_user: String = "a".repeat(256);
+        let err = write_userpass_auth(&long_user, "p").unwrap_err();
+        match err {
+            Error::Config(m) => assert!(m.to_lowercase().contains("too long")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn userpass_request_rejects_too_long_pass() {
+        let long_pass: String = "p".repeat(256);
+        let err = write_userpass_auth("u", &long_pass).unwrap_err();
+        match err {
+            Error::Config(m) => assert!(m.to_lowercase().contains("too long")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn userpass_reply_accepts_status_0() {
+        parse_userpass_reply(&[0x01, 0x00]).unwrap();
+        // Lenient: also accept a server that echoes 0x05.
+        parse_userpass_reply(&[0x05, 0x00]).unwrap();
+    }
+
+    #[test]
+    fn userpass_reply_rejects_status_nonzero() {
+        let err = parse_userpass_reply(&[0x01, 0x01]).unwrap_err();
+        match err {
+            Error::Service(m) => assert!(m.to_lowercase().contains("auth failed")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn userpass_reply_rejects_short() {
+        parse_userpass_reply(&[0x01]).unwrap_err();
+    }
+
+    #[test]
+    fn connect_request_picks_ipv4_atyp() {
+        let out = write_connect_request("10.1.2.3", 3306).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                0x05,
+                0x01,
+                0x00,
+                0x01,
+                10,
+                1,
+                2,
+                3,
+                (3306u16 >> 8) as u8,
+                (3306u16 & 0xff) as u8
+            ]
+        );
+    }
+
+    #[test]
+    fn connect_request_picks_ipv6_atyp() {
+        let out = write_connect_request("::1", 80).unwrap();
+        assert_eq!(out[0..4], [0x05, 0x01, 0x00, 0x04]);
+        // ::1 = 15 zero octets + 0x01
+        let mut expected_addr = [0u8; 16];
+        expected_addr[15] = 1;
+        assert_eq!(&out[4..20], &expected_addr);
+        assert_eq!(&out[20..22], &80u16.to_be_bytes());
+    }
+
+    #[test]
+    fn connect_request_picks_domain_atyp() {
+        let out = write_connect_request("db.example.invalid", 3306).unwrap();
+        assert_eq!(out[0..5], [0x05, 0x01, 0x00, 0x03, 11]);
+        assert_eq!(&out[5..16], b"db.example.invalid");
+        assert_eq!(&out[16..18], &3306u16.to_be_bytes());
+    }
+
+    #[test]
+    fn connect_request_rejects_long_domain() {
+        let long_host: String = "a".repeat(256);
+        let err = write_connect_request(&long_host, 80).unwrap_err();
+        match err {
+            Error::Config(m) => assert!(m.to_lowercase().contains("too long")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_request_rejects_empty_domain() {
+        let err = write_connect_request("", 80).unwrap_err();
+        match err {
+            Error::Config(m) => assert!(m.to_lowercase().contains("empty")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_reply_accepts_succeeded_with_ipv4_bnd() {
+        // VER REP RSV ATYP=IPv4 0.0.0.0 :0
+        let buf = [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        parse_connect_reply(&buf).unwrap();
+    }
+
+    #[test]
+    fn connect_reply_accepts_succeeded_with_domain_bnd() {
+        let mut buf = vec![0x05, 0x00, 0x00, 0x03, 11];
+        buf.extend_from_slice(b"example.com");
+        buf.extend_from_slice(&80u16.to_be_bytes());
+        parse_connect_reply(&buf).unwrap();
+    }
+
+    #[test]
+    fn connect_reply_accepts_succeeded_with_ipv6_bnd() {
+        let mut buf = vec![0x05, 0x00, 0x00, 0x04];
+        buf.extend_from_slice(&[0u8; 16]);
+        buf.extend_from_slice(&80u16.to_be_bytes());
+        parse_connect_reply(&buf).unwrap();
+    }
+
+    #[test]
+    fn connect_reply_rejects_host_unreachable() {
+        let buf = [0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        let err = parse_connect_reply(&buf).unwrap_err();
+        match err {
+            Error::Service(m) => assert!(m.to_lowercase().contains("host unreachable")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_reply_rejects_general_failure() {
+        let buf = [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        let err = parse_connect_reply(&buf).unwrap_err();
+        match err {
+            Error::Service(m) => assert!(m.to_lowercase().contains("general failure")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_reply_rejects_truncated() {
+        parse_connect_reply(&[]).unwrap_err();
+        parse_connect_reply(&[0x05, 0x00]).unwrap_err();
+        // Domain ATYP but missing length+port:
+        parse_connect_reply(&[0x05, 0x00, 0x00, 0x03]).unwrap_err();
+    }
+
+    #[test]
+    fn connect_reply_body_len_dispatch() {
+        assert_eq!(connect_reply_body_len(ATYP_IPV4, 0), Some(5));
+        assert_eq!(connect_reply_body_len(ATYP_IPV6, 0), Some(17));
+        assert_eq!(connect_reply_body_len(ATYP_DOMAIN, 11), Some(13)); // 11 + 2 port
+        assert_eq!(connect_reply_body_len(0x99, 0), None);
     }
 }
