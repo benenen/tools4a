@@ -61,6 +61,15 @@ impl Service for BrowserOrchestrator {
                 }
                 result
             }
+            Some(TunnelConfig::Socks5 { .. }) => {
+                // Phase 19 Task F replaces this with a passthrough that
+                // injects `--proxy socks5://[user:pass@]host:port` into the
+                // request. Leaving a stub error here keeps Task C reviewable
+                // independent of the browser-specific wiring.
+                Err(Error::Config(
+                    "tunnel=socks5 for browser is not wired yet (Phase 19 Task F)".into(),
+                ))
+            }
         }
     }
 }

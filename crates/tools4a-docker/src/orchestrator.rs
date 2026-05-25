@@ -157,6 +157,14 @@ async fn resolve_target(
             "unix_socket only valid with tunnel=ssh (use docker_host=unix://path for local socket)"
                 .to_string(),
         )),
+        // SOCKS5 tunnel not currently wired through docker — the remote
+        // Docker daemon is reached through SSH unix-socket forwarding,
+        // which has no SOCKS5 equivalent.
+        (Some(TunnelConfig::Socks5 { .. }), _) => Err(Error::Config(
+            "docker does not support --tunnel=socks5 (use --tunnel=ssh with the remote \
+             daemon's unix_socket, or expose the daemon over TCP and use --tunnel=direct)"
+                .to_string(),
+        )),
     }
 }
 

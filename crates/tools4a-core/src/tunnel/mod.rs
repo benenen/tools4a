@@ -47,5 +47,18 @@ pub fn build_tunnel(
                 target_port,
             )?))
         }
+        Some(TunnelConfig::Socks5 {
+            socks5_host,
+            socks5_port,
+            socks5_user,
+            socks5_password,
+        }) => Ok(Box::new(Socks5ClientTunnel::new(
+            socks5_host,
+            socks5_port,
+            socks5_user,
+            socks5_password,
+            target_host,
+            target_port,
+        )?)),
     }
 }

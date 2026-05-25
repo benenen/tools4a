@@ -52,6 +52,14 @@ impl Service for SshDirectOrchestrator {
                 key_path: ssh_key_path.map(std::path::PathBuf::from),
                 port: ssh_port,
             }),
+            Some(TunnelConfig::Socks5 { .. }) => {
+                return Err(Error::Config(
+                    "ssh-direct does not currently support --tunnel=socks5 — \
+                     run ssh through the proxy using a ProxyCommand instead, or \
+                     reach the target with --tunnel=ssh"
+                        .into(),
+                ));
+            }
         };
 
         let mut result = apply_with_timeout(deadline, ssh_execute(req, jumps)).await?;

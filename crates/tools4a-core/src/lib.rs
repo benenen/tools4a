@@ -181,8 +181,8 @@ impl ExecutionResult {
 // -- TunnelConfig -------------------------------------------------------
 
 /// Tunnel selection plus its parameters. Shared shape across all services.
-/// Runtime impls (`DirectTunnel`, `SshTunnel`) live in this crate's
-/// `tunnel` module.
+/// Runtime impls (`DirectTunnel`, `SshTunnel`, `Socks5ClientTunnel`) live
+/// in this crate's `tunnel` module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TunnelConfig {
@@ -200,10 +200,24 @@ pub enum TunnelConfig {
         #[serde(default = "default_ssh_port")]
         ssh_port: u16,
     },
+    /// Route through an already-running external SOCKS5 proxy. Phase 19.
+    Socks5 {
+        socks5_host: String,
+        #[serde(default = "default_socks5_port")]
+        socks5_port: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socks5_user: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socks5_password: Option<String>,
+    },
 }
 
 fn default_ssh_port() -> u16 {
     22
+}
+
+fn default_socks5_port() -> u16 {
+    1080
 }
 
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -281,6 +295,108 @@ ssh_user: admin
                 );
             }
             _ => panic!("expected Ssh"),
+        }
+    }
+
+    #[test]
+    fn test_tunnel_config_socks5_minimal_yaml() {
+        let yaml = r#"
+type: socks5
+socks5_host: 192.0.2.10
+"#;
+        let cfg: TunnelConfig = serde_yml::from_str(yaml).unwrap();
+        match cfg {
+            TunnelConfig::Socks5 {
+                socks5_host,
+                socks5_port,
+                socks5_user,
+                socks5_password,
+            } => {
+                assert_eq!(socks5_host, "192.0.2.10");
+                assert_eq!(socks5_port, 1080);
+                assert!(socks5_user.is_none());
+                assert!(socks5_password.is_none());
+            }
+            _ => panic!("expected Socks5"),
+        }
+    }
+
+    #[test]
+    fn test_tunnel_config_socks5_full_yaml() {
+        let yaml = r#"
+type: socks5
+socks5_host: proxy.internal
+socks5_port: 2235
+socks5_user: alice
+socks5_password: s3cret
+"#;
+        let cfg: TunnelConfig = serde_yml::from_str(yaml).unwrap();
+        match cfg {
+            TunnelConfig::Socks5 {
+                socks5_host,
+                socks5_port,
+                socks5_user,
+                socks5_password,
+            } => {
+                assert_eq!(socks5_host, "proxy.internal");
+                assert_eq!(socks5_port, 2235);
+                assert_eq!(socks5_user.as_deref(), Some("alice"));
+                assert_eq!(socks5_password.as_deref(), Some("s3cret"));
+            }
+            _ => panic!("expected Socks5"),
+        }
+    }
+
+    #[test]
+    fn test_tunnel_config_socks5_serialize_skips_none_auth() {
+        let cfg = TunnelConfig::Socks5 {
+            socks5_host: "p".into(),
+            socks5_port: 1080,
+            socks5_user: None,
+            socks5_password: None,
+        };
+        let yaml = serde_yml::to_string(&cfg).unwrap();
+        assert!(!yaml.contains("socks5_user"), "{yaml}");
+        assert!(!yaml.contains("socks5_password"), "{yaml}");
+        // And round-trips cleanly.
+        let back: TunnelConfig = serde_yml::from_str(&yaml).unwrap();
+        match back {
+            TunnelConfig::Socks5 {
+                socks5_host,
+                socks5_user,
+                socks5_password,
+                ..
+            } => {
+                assert_eq!(socks5_host, "p");
+                assert!(socks5_user.is_none());
+                assert!(socks5_password.is_none());
+            }
+            _ => panic!("expected Socks5"),
+        }
+    }
+
+    #[test]
+    fn test_tunnel_config_socks5_toml_round_trip() {
+        // Verifies the variant works under TOML (Profile uses TOML), since
+        // serde_yml and toml have slightly different defaults around enums.
+        let cfg = TunnelConfig::Socks5 {
+            socks5_host: "p".into(),
+            socks5_port: 2235,
+            socks5_user: Some("u".into()),
+            socks5_password: Some("pw".into()),
+        };
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let back: TunnelConfig = toml::from_str(&toml_str).unwrap();
+        match back {
+            TunnelConfig::Socks5 {
+                socks5_port,
+                socks5_user,
+                ..
+            } => {
+                assert_eq!(socks5_port, 2235);
+                assert_eq!(socks5_user.as_deref(), Some("u"));
+            }
+            _ => panic!("expected Socks5"),
         }
     }
 }
