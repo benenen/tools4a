@@ -46,6 +46,9 @@ pub struct Cli {
     #[command(flatten)]
     pub ssh: SshTunnelArgs,
 
+    #[command(flatten)]
+    pub socks5: Socks5TunnelArgs,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -73,10 +76,30 @@ pub struct SshTunnelArgs {
     pub ssh_port: Option<u16>,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct Socks5TunnelArgs {
+    /// SOCKS5 proxy host (used when --tunnel=socks5). Phase 19.
+    #[arg(long, global = true, requires = "tunnel", help_heading = "Tunnel")]
+    pub socks5_host: Option<String>,
+
+    /// SOCKS5 proxy port (used when --tunnel=socks5, default 1080)
+    #[arg(long, global = true, requires = "tunnel", help_heading = "Tunnel")]
+    pub socks5_port: Option<u16>,
+
+    /// SOCKS5 username for RFC 1929 auth (requires --socks5-password)
+    #[arg(long, global = true, requires = "tunnel", help_heading = "Tunnel")]
+    pub socks5_user: Option<String>,
+
+    /// SOCKS5 password for RFC 1929 auth (requires --socks5-user)
+    #[arg(long, global = true, requires = "tunnel", help_heading = "Tunnel")]
+    pub socks5_password: Option<String>,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug)]
 pub enum TunnelKind {
     Direct,
     Ssh,
+    Socks5,
 }
 
 /// Tunnel shape for `tools4a tunnel-serve`. Maps onto the three impls
@@ -739,5 +762,40 @@ mod tests {
 
         let cli = Cli::try_parse_from(["tools4a", "--tunnel=direct", "mysql", "SELECT 1"]).unwrap();
         assert!(matches!(cli.tunnel, Some(TunnelKind::Direct)));
+    }
+
+    #[test]
+    fn test_tunnel_kind_socks5_parse() {
+        let cli = Cli::try_parse_from(["tools4a", "--tunnel=socks5", "mysql", "SELECT 1"]).unwrap();
+        assert!(matches!(cli.tunnel, Some(TunnelKind::Socks5)));
+    }
+
+    #[test]
+    fn test_socks5_flags_require_tunnel() {
+        // --socks5-host without --tunnel must fail (the `requires = "tunnel"` attr).
+        let result = Cli::try_parse_from(["tools4a", "--socks5-host=p", "mysql", "SELECT 1"]);
+        assert!(
+            result.is_err(),
+            "expected parse error when --socks5-host used without --tunnel"
+        );
+    }
+
+    #[test]
+    fn test_socks5_flags_parse_with_tunnel() {
+        let cli = Cli::try_parse_from([
+            "tools4a",
+            "--tunnel=socks5",
+            "--socks5-host=192.0.2.10",
+            "--socks5-port=2235",
+            "--socks5-user=alice",
+            "--socks5-password=s3cret",
+            "mysql",
+            "SELECT 1",
+        ])
+        .unwrap();
+        assert_eq!(cli.socks5.socks5_host.as_deref(), Some("192.0.2.10"));
+        assert_eq!(cli.socks5.socks5_port, Some(2235));
+        assert_eq!(cli.socks5.socks5_user.as_deref(), Some("alice"));
+        assert_eq!(cli.socks5.socks5_password.as_deref(), Some("s3cret"));
     }
 }

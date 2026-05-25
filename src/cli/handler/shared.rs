@@ -120,27 +120,44 @@ pub(super) fn print_warnings(result: &ExecutionResult) {
     }
 }
 
-/// Convert top-level CLI `--tunnel` + `--ssh-*` flags into a `TunnelConfig`.
+/// Convert top-level CLI `--tunnel` + `--ssh-*` + `--socks5-*` flags into a
+/// `TunnelConfig`. Cross-validates that flags from the wrong family aren't
+/// mixed with the chosen `--tunnel` kind.
 pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
     let Some(kind) = cli.tunnel else {
         return Ok(None);
     };
     let ssh = &cli.ssh;
+    let socks5 = &cli.socks5;
+    let stray_ssh = ssh.ssh_jump.is_some()
+        || ssh.ssh_user.is_some()
+        || ssh.ssh_password.is_some()
+        || ssh.ssh_key_path.is_some()
+        || ssh.ssh_port.is_some();
+    let stray_socks5 = socks5.socks5_host.is_some()
+        || socks5.socks5_port.is_some()
+        || socks5.socks5_user.is_some()
+        || socks5.socks5_password.is_some();
     match kind {
         TunnelKind::Direct => {
-            let stray_ssh = ssh.ssh_jump.is_some()
-                || ssh.ssh_user.is_some()
-                || ssh.ssh_password.is_some()
-                || ssh.ssh_key_path.is_some()
-                || ssh.ssh_port.is_some();
             if stray_ssh {
                 return Err(Error::Config(
                     "SSH options (--ssh-*) are only valid with --tunnel=ssh".to_string(),
                 ));
             }
+            if stray_socks5 {
+                return Err(Error::Config(
+                    "SOCKS5 options (--socks5-*) are only valid with --tunnel=socks5".to_string(),
+                ));
+            }
             Ok(Some(TunnelConfig::Direct))
         }
         TunnelKind::Ssh => {
+            if stray_socks5 {
+                return Err(Error::Config(
+                    "SOCKS5 options (--socks5-*) are only valid with --tunnel=socks5".to_string(),
+                ));
+            }
             let raw_jump = ssh.ssh_jump.clone().ok_or_else(|| {
                 Error::Config("--ssh-jump is required when --tunnel=ssh".to_string())
             })?;
@@ -163,6 +180,30 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
                 ssh_port: ssh.ssh_port.unwrap_or(22),
             }))
         }
+        TunnelKind::Socks5 => {
+            if stray_ssh {
+                return Err(Error::Config(
+                    "SSH options (--ssh-*) are only valid with --tunnel=ssh".to_string(),
+                ));
+            }
+            let host = socks5.socks5_host.clone().ok_or_else(|| {
+                Error::Config("--socks5-host is required when --tunnel=socks5".to_string())
+            })?;
+            if host.is_empty() {
+                return Err(Error::Config("--socks5-host must not be empty".to_string()));
+            }
+            if socks5.socks5_user.is_some() != socks5.socks5_password.is_some() {
+                return Err(Error::Config(
+                    "--socks5-user and --socks5-password must be set together".to_string(),
+                ));
+            }
+            Ok(Some(TunnelConfig::Socks5 {
+                socks5_host: host,
+                socks5_port: socks5.socks5_port.unwrap_or(1080),
+                socks5_user: socks5.socks5_user.clone(),
+                socks5_password: socks5.socks5_password.clone(),
+            }))
+        }
     }
 }
 
@@ -178,5 +219,105 @@ fn profile_to_config(profile: &Profile) -> Config {
         key_path: profile.key_path.clone(),
         tunnel: profile.tunnel.clone(),
         timeout_secs: profile.timeout_secs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(extra: &[&str]) -> Cli {
+        let mut args = vec!["tools4a"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["mysql", "SELECT 1"]);
+        Cli::try_parse_from(args).expect("CLI parse")
+    }
+
+    #[test]
+    fn socks5_minimal_builds_socks5_variant() {
+        let cli = parse(&["--tunnel=socks5", "--socks5-host=192.0.2.10"]);
+        match cli_to_tunnel_config(&cli).unwrap() {
+            Some(TunnelConfig::Socks5 {
+                socks5_host,
+                socks5_port,
+                socks5_user,
+                socks5_password,
+            }) => {
+                assert_eq!(socks5_host, "192.0.2.10");
+                assert_eq!(socks5_port, 1080);
+                assert!(socks5_user.is_none());
+                assert!(socks5_password.is_none());
+            }
+            other => panic!("expected Socks5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn socks5_with_auth_builds_full_variant() {
+        let cli = parse(&[
+            "--tunnel=socks5",
+            "--socks5-host=p",
+            "--socks5-port=2235",
+            "--socks5-user=alice",
+            "--socks5-password=s3cret",
+        ]);
+        match cli_to_tunnel_config(&cli).unwrap() {
+            Some(TunnelConfig::Socks5 {
+                socks5_port,
+                socks5_user,
+                socks5_password,
+                ..
+            }) => {
+                assert_eq!(socks5_port, 2235);
+                assert_eq!(socks5_user.as_deref(), Some("alice"));
+                assert_eq!(socks5_password.as_deref(), Some("s3cret"));
+            }
+            other => panic!("expected Socks5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn socks5_missing_host_errors() {
+        let cli = parse(&["--tunnel=socks5"]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("--socks5-host")));
+    }
+
+    #[test]
+    fn socks5_user_without_password_errors() {
+        let cli = parse(&["--tunnel=socks5", "--socks5-host=p", "--socks5-user=alice"]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("set together")));
+    }
+
+    #[test]
+    fn direct_rejects_stray_socks5() {
+        let cli = parse(&["--tunnel=direct", "--socks5-host=p"]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("--socks5-*")));
+    }
+
+    #[test]
+    fn ssh_rejects_stray_socks5() {
+        let cli = parse(&[
+            "--tunnel=ssh",
+            "--ssh-jump=bastion.com",
+            "--ssh-user=u",
+            "--socks5-host=p",
+        ]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("--socks5-*")));
+    }
+
+    #[test]
+    fn socks5_rejects_stray_ssh() {
+        let cli = parse(&[
+            "--tunnel=socks5",
+            "--socks5-host=p",
+            "--ssh-jump=bastion.com",
+        ]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("--ssh-*")));
     }
 }
