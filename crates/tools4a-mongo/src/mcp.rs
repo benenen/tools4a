@@ -45,6 +45,16 @@ pub struct MongoExecParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_port: Option<u16>,
 
+    /// SOCKS5 proxy host (used when tunnel = "socks5"). Phase 19.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_password: Option<String>,
+
     /// Per-call execution timeout in seconds. Capped by the operator's
     /// `TOOLS4A_MAX_TIMEOUT_SECS` env var or TOML `[defaults]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +116,10 @@ fn params_to_config(p: &MongoExecParams, toml: Option<TomlConfig>) -> Result<Con
         p.ssh_password.clone(),
         p.ssh_key_path.clone(),
         p.ssh_port,
+        p.socks5_host.clone(),
+        p.socks5_port,
+        p.socks5_user.clone(),
+        p.socks5_password.clone(),
     )?;
 
     configs.push(Config {

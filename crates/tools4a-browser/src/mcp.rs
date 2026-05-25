@@ -63,6 +63,16 @@ pub struct BrowserExecParams {
     pub ssh_key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_port: Option<u16>,
+
+    /// SOCKS5 proxy host (used when tunnel = "socks5"). Phase 19.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_password: Option<String>,
 }
 
 pub struct BrowserMcp;
@@ -94,6 +104,10 @@ impl McpTool for BrowserMcp {
             params.ssh_password,
             params.ssh_key_path,
             params.ssh_port,
+            params.socks5_host,
+            params.socks5_port,
+            params.socks5_user,
+            params.socks5_password,
         )?;
 
         BrowserOrchestrator::execute(req, tunnel).await
@@ -125,6 +139,10 @@ mod tests {
             ssh_password: None,
             ssh_key_path: None,
             ssh_port: None,
+            socks5_host: None,
+            socks5_port: None,
+            socks5_user: None,
+            socks5_password: None,
         };
         let err = BrowserMcp::invoke(params).await.unwrap_err();
         let msg = format!("{err}");

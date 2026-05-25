@@ -63,6 +63,19 @@ pub struct MysqlExecParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_port: Option<u16>,
 
+    /// SOCKS5 proxy host (used when tunnel = "socks5"). Phase 19.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_host: Option<String>,
+    /// SOCKS5 proxy port (default 1080).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_port: Option<u16>,
+    /// SOCKS5 username (RFC 1929 user/pass auth — requires socks5_password).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_user: Option<String>,
+    /// SOCKS5 password (RFC 1929 user/pass auth — requires socks5_user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_password: Option<String>,
+
     /// Per-call execution timeout in seconds. Capped by the operator's
     /// `TOOLS4A_MAX_TIMEOUT_SECS` env var or TOML `[defaults]`. When
     /// unset, the service default applies.
@@ -127,6 +140,10 @@ fn params_to_config(p: &MysqlExecParams, toml: Option<TomlConfig>) -> Result<Con
         p.ssh_password.clone(),
         p.ssh_key_path.clone(),
         p.ssh_port,
+        p.socks5_host.clone(),
+        p.socks5_port,
+        p.socks5_user.clone(),
+        p.socks5_password.clone(),
     )?;
 
     configs.push(Config {
@@ -181,6 +198,10 @@ mod tests {
             ssh_password: None,
             ssh_key_path: None,
             ssh_port: None,
+            socks5_host: None,
+            socks5_port: None,
+            socks5_user: None,
+            socks5_password: None,
             timeout_secs: None,
             include_ui: false,
             format: "toon".to_string(),

@@ -43,6 +43,19 @@ pub struct DockerConnectionFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_port: Option<u16>,
 
+    /// SOCKS5 proxy host (used when tunnel = "socks5"). Phase 19.
+    /// Note: docker tools error on socks5 — the daemon is reached via
+    /// SSH unix-socket forwarding, not SOCKS5. The fields are kept for
+    /// schema-symmetry with other MCP tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks5_password: Option<String>,
+
     /// Per-call timeout (seconds). Defaults to 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
@@ -64,6 +77,10 @@ fn build_req(
         conn.ssh_password,
         conn.ssh_key_path,
         conn.ssh_port,
+        conn.socks5_host,
+        conn.socks5_port,
+        conn.socks5_user,
+        conn.socks5_password,
     )?;
     let req = DockerRequest {
         action,
