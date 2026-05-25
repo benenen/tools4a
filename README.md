@@ -29,6 +29,7 @@ This is the Phase 14 Phase 2 release. Currently implemented:
 - SSH tunnel (`--tunnel=ssh`) with single- or multi-hop jump (`--ssh-jump=h1[,h2,...]`),
   password or key auth. Host keys accepted with a fingerprint warning.
   Works for all eight services: seven use single-port `direct-tcpip` via `SshTunnel`; browser uses a built-in per-call SOCKS5 server (`SocksTunnel`) over the same SSH chain (because a browser needs to reach many target hosts dynamically, not one fixed endpoint).
+- External SOCKS5 proxy as a tunnel (`--tunnel=socks5 --socks5-host=H --socks5-port=P [--socks5-user=U --socks5-password=W]`, default port 1080, RFC 1929 user/pass auth supported). All tunneled services route through `Socks5ClientTunnel`; browser short-circuits and passes `socks5://[user:pass@]host:port` directly to agent-browser's `--proxy`. `ssh` and `docker` are the exceptions — they error on `--tunnel=socks5`.
 - MCP server mode (`tools4a` with no subcommand) over stdio. SQL tools (mysql/pgsql/clickhouse) and HTTP tool return a second `Content::resource` (MCP App UI, MIME `text/html`) alongside the JSON text — clients without MCP Apps support ignore it.
 
 Not yet implemented:
@@ -114,6 +115,15 @@ tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-password=secr
 # Through two SSH jumps (comma-separated; all share --ssh-user/--ssh-password)
 tools4a --tunnel=ssh --ssh-jump=bastion1.com,bastion2.com --ssh-user=admin \
   --ssh-key-path=~/.ssh/jump_key \
+  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+
+# Through an external SOCKS5 proxy
+tools4a --tunnel=socks5 --socks5-host=192.0.2.10 --socks5-port=2235 \
+  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+
+# Through an external SOCKS5 proxy with RFC 1929 user/pass auth
+tools4a --tunnel=socks5 --socks5-host=proxy.internal --socks5-user=alice \
+  --socks5-password=s3cret \
   mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
 ```
 
