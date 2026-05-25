@@ -5,6 +5,7 @@
 
 mod direct;
 pub mod socks;
+mod socks5_client_tunnel;
 mod socks_tunnel;
 mod ssh;
 mod streamlocal;
@@ -13,6 +14,7 @@ use crate::{Result, Tunnel, TunnelConfig};
 
 pub use direct::DirectTunnel;
 pub use socks_tunnel::SocksTunnel;
+pub use socks5_client_tunnel::Socks5ClientTunnel;
 pub use ssh::SshTunnel;
 pub use streamlocal::StreamLocalTunnel;
 
