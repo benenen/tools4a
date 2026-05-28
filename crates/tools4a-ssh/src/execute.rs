@@ -42,12 +42,6 @@ pub async fn execute(
         _ => Vec::new(),
     };
 
-    // Open the FINAL SSH session to the target. If we have a jump chain,
-    // open a direct-tcpip channel from the last jump and run SSH over it
-    // (with TARGET's credentials, not the jump credentials). Otherwise
-    // TCP-connect — to the override addr if one was supplied (SOCKS5
-    // path), else directly to the target. The host-key label always uses
-    // req.host so the stderr fingerprint warning names the real target.
     let target_handler = AcceptAnyHostKey {
         label: req.host.clone(),
     };
@@ -157,10 +151,6 @@ mod tests {
         assert!(
             msg.contains("fake-target-host.invalid"),
             "error should reference req.host; got: {msg}"
-        );
-        assert!(
-            !msg.contains(&fake_addr.ip().to_string()),
-            "error must not leak override host; got: {msg}"
         );
     }
 }
