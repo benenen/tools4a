@@ -183,7 +183,7 @@ impl ExecutionResult {
 /// One resolved hop in an SSH jump chain. Post-merge: `user` is required,
 /// `port` is concrete (defaulted to 22 if absent), `password`/`key_path`
 /// stay optional because either may carry auth.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JumpHop {
     pub host: String,
     pub user: String,
@@ -193,6 +193,18 @@ pub struct JumpHop {
     pub key_path: Option<String>,
     #[serde(default = "default_ssh_port")]
     pub port: u16,
+}
+
+impl std::fmt::Debug for JumpHop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JumpHop")
+            .field("host", &self.host)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("key_path", &self.key_path)
+            .field("port", &self.port)
+            .finish()
+    }
 }
 
 /// Tunnel selection plus its parameters. Shared shape across all services.
@@ -350,6 +362,44 @@ socks5_password: s3cret
             }
             _ => panic!("expected Socks5"),
         }
+    }
+
+    #[test]
+    fn test_jump_hop_debug_masks_password() {
+        let hop = JumpHop {
+            host: "bastion.example.com".to_string(),
+            user: "admin".to_string(),
+            password: Some("secret".to_string()),
+            key_path: Some("/home/admin/.ssh/id_rsa".to_string()),
+            port: 22,
+        };
+        let debug_output = format!("{:?}", hop);
+        assert!(
+            debug_output.contains("<redacted>"),
+            "expected '<redacted>' in debug output, got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("secret"),
+            "password 'secret' must not appear in debug output, got: {debug_output}"
+        );
+        // key_path stays visible
+        assert!(
+            debug_output.contains("/home/admin/.ssh/id_rsa"),
+            "key_path should be visible in debug output, got: {debug_output}"
+        );
+        // None password also works without leaking anything unexpected
+        let hop_no_pw = JumpHop {
+            host: "b".to_string(),
+            user: "u".to_string(),
+            password: None,
+            key_path: None,
+            port: 22,
+        };
+        let debug_none = format!("{:?}", hop_no_pw);
+        assert!(
+            !debug_none.contains("secret"),
+            "no password should be present, got: {debug_none}"
+        );
     }
 
     #[test]
