@@ -85,7 +85,35 @@ HTTP and SSH-direct have no profile/YAML — pass all fields explicitly.
 {"tunnel": "ssh", "ssh_jump": ["b1.com", "b2.com"], ...}
 ```
 
-All hops share the same `ssh_user` / `ssh_password` / `ssh_key_path` / `ssh_port`. Per-hop overrides not supported yet.
+All hops share the same `ssh_user` / `ssh_password` / `ssh_key_path` / `ssh_port` when using the string forms above. For chains where each hop needs different credentials, use the object form (MCP) or `--ssh-hop` (CLI).
+
+### Per-hop credentials (MCP)
+
+When hops in the chain need different credentials, pass `ssh_jump` as an
+array of objects. Each object's `user`/`password`/`key_path`/`port` is
+optional and falls back to the top-level `ssh_user`/etc.
+
+```json
+{
+  "tunnel": "ssh",
+  "ssh_jump": [
+    {"host": "gateway.example.invalid", "user": "admin", "password": "not-a-real-password"},
+    {"host": "10.x.x.54",    "user": "xxjs",  "password": "not-a-real-password", "port": 2222}
+  ]
+}
+```
+
+### Per-hop credentials (CLI)
+
+Use `--ssh-hop` (repeatable) with a JSON object per hop. Mutually exclusive
+with `--ssh-jump`:
+
+```bash
+tools4a --tunnel=ssh \
+    --ssh-hop '{"host":"gateway.example.invalid","user":"admin","password":"not-a-real-password"}' \
+    --ssh-hop '{"host":"10.x.x.54","user":"xxjs","password":"not-a-real-password"}' \
+    mysql "SELECT 1" --host=db.example.invalid --user=app --password=secret
+```
 
 For **`ssh_exec`** specifically: the TARGET creds (`user`, `password` / `key_path`, `port`) and the JUMP creds (`ssh_*`) are independent. The tool never infers one from the other — supply both even when they happen to be the same.
 
