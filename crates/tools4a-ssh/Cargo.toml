@@ -12,4 +12,4 @@ tokio = { version = "1.40", features = ["sync", "macros"] }
 tools4a-core = { path = "../tools4a-core" }
 
 [dev-dependencies]
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }

@@ -62,7 +62,7 @@ impl Service for SshDirectOrchestrator {
             }
         };
 
-        let mut result = apply_with_timeout(deadline, ssh_execute(req, jumps)).await?;
+        let mut result = apply_with_timeout(deadline, ssh_execute(req, jumps, None)).await?;
         if let Some(w) = deadline.clamp_warning() {
             result.push_warning(w);
         }
