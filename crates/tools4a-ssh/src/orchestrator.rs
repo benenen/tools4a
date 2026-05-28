@@ -9,8 +9,8 @@ use crate::execute as ssh_execute;
 use crate::request::{SshExecRequest, SshJumpsConfig};
 use async_trait::async_trait;
 use tools4a_core::{
-    Error, ExecutionResult, Result, Service, TunnelConfig, apply_with_timeout,
-    resolve_effective_timeout,
+    Error, ExecutionResult, Result, Service, Socks5ClientTunnel, Tunnel, TunnelConfig,
+    apply_with_timeout, resolve_effective_timeout,
 };
 
 /// Service default for the per-call execution timeout. Shell commands
@@ -37,32 +37,60 @@ impl Service for SshDirectOrchestrator {
         let deadline =
             resolve_effective_timeout(req.timeout_secs, DEFAULT_TIMEOUT_SECS, req.max_timeout_secs);
 
-        let jumps = match tunnel_config {
-            None | Some(TunnelConfig::Direct) => None,
+        // Decide how to reach the target. Three shapes:
+        //  - Direct / no tunnel: russh dials req.host directly.
+        //  - SSH jump chain: russh runs over a direct-tcpip channel from
+        //    the last jump (handled by ssh_execute when `jumps` is Some).
+        //  - SOCKS5: stand up a local Socks5ClientTunnel, redirect the
+        //    russh dial to its endpoint via `connect_addr_override`.
+        let (jumps, mut socks_tunnel, connect_override) = match tunnel_config {
+            None | Some(TunnelConfig::Direct) => (None, None, None),
             Some(TunnelConfig::Ssh {
                 ssh_jumps,
                 ssh_user,
                 ssh_password,
                 ssh_key_path,
                 ssh_port,
-            }) => Some(SshJumpsConfig {
-                jumps: ssh_jumps,
-                user: ssh_user,
-                password: ssh_password,
-                key_path: ssh_key_path.map(std::path::PathBuf::from),
-                port: ssh_port,
-            }),
-            Some(TunnelConfig::Socks5 { .. }) => {
-                return Err(Error::Config(
-                    "ssh-direct does not currently support --tunnel=socks5 — \
-                     run ssh through the proxy using a ProxyCommand instead, or \
-                     reach the target with --tunnel=ssh"
-                        .into(),
-                ));
+            }) => (
+                Some(SshJumpsConfig {
+                    jumps: ssh_jumps,
+                    user: ssh_user,
+                    password: ssh_password,
+                    key_path: ssh_key_path.map(std::path::PathBuf::from),
+                    port: ssh_port,
+                }),
+                None,
+                None,
+            ),
+            Some(TunnelConfig::Socks5 {
+                socks5_host,
+                socks5_port,
+                socks5_user,
+                socks5_password,
+            }) => {
+                let mut tunnel = Socks5ClientTunnel::new(
+                    socks5_host,
+                    socks5_port,
+                    socks5_user,
+                    socks5_password,
+                    req.host.clone(),
+                    req.port,
+                )?;
+                let endpoint = tunnel.establish().await?;
+                let override_addr = (endpoint.host, endpoint.port);
+                (None, Some(tunnel), Some(override_addr))
             }
         };
 
-        let mut result = apply_with_timeout(deadline, ssh_execute(req, jumps, None)).await?;
+        let exec_result =
+            apply_with_timeout(deadline, ssh_execute(req, jumps, connect_override)).await;
+
+        // Always tear the tunnel down, regardless of success/failure.
+        if let Some(t) = socks_tunnel.as_mut() {
+            let _ = t.close().await;
+        }
+
+        let mut result = exec_result?;
         if let Some(w) = deadline.clamp_warning() {
             result.push_warning(w);
         }
