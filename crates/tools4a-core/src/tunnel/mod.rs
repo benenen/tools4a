@@ -29,24 +29,11 @@ pub fn build_tunnel(
         None | Some(TunnelConfig::Direct) => {
             Ok(Box::new(DirectTunnel::new(target_host, target_port)))
         }
-        Some(TunnelConfig::Ssh {
+        Some(TunnelConfig::Ssh { ssh_jumps }) => Ok(Box::new(SshTunnel::new(
             ssh_jumps,
-            ssh_user,
-            ssh_password,
-            ssh_key_path,
-            ssh_port,
-        }) => {
-            let key_path = ssh_key_path.map(std::path::PathBuf::from);
-            Ok(Box::new(SshTunnel::new(
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                key_path,
-                ssh_port,
-                target_host,
-                target_port,
-            )?))
-        }
+            target_host,
+            target_port,
+        )?)),
         Some(TunnelConfig::Socks5 {
             socks5_host,
             socks5_port,

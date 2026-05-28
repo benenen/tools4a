@@ -29,12 +29,7 @@ use crate::{Error, Result, Tunnel, TunnelEndpoint};
 /// shape-of-routing it needs (many on-demand target hosts, not one
 /// fixed target like SshTunnel).
 pub struct SocksTunnel {
-    ssh_jumps: Vec<String>,
-    ssh_user: String,
-    ssh_password: Option<String>,
-    ssh_key_path: Option<std::path::PathBuf>,
-    ssh_port: u16,
-
+    ssh_jumps: Vec<crate::JumpHop>,
     /// Optional fixed listen address. `None` → 127.0.0.1:0 (random),
     /// the historic behavior. `Some` set via `with_listen_addr` for
     /// Phase 16 `tunnel-serve` daemon.
@@ -56,13 +51,7 @@ struct SocksTunnelState {
 }
 
 impl SocksTunnel {
-    pub fn new(
-        ssh_jumps: Vec<String>,
-        ssh_user: String,
-        ssh_password: Option<String>,
-        ssh_key_path: Option<std::path::PathBuf>,
-        ssh_port: u16,
-    ) -> Result<Self> {
+    pub fn new(ssh_jumps: Vec<crate::JumpHop>) -> Result<Self> {
         if ssh_jumps.is_empty() {
             return Err(Error::Config(
                 "SocksTunnel requires at least one jump host".to_string(),
@@ -70,10 +59,6 @@ impl SocksTunnel {
         }
         Ok(Self {
             ssh_jumps,
-            ssh_user,
-            ssh_password,
-            ssh_key_path,
-            ssh_port,
             listen_addr: None,
             state: None,
         })
@@ -97,14 +82,7 @@ impl Tunnel for SocksTunnel {
         }
 
         // 1. Build the SSH chain. Same helper SshTunnel uses.
-        let sessions = build_session_chain(
-            &self.ssh_jumps,
-            &self.ssh_user,
-            self.ssh_password.as_deref(),
-            self.ssh_key_path.as_deref(),
-            self.ssh_port,
-        )
-        .await?;
+        let sessions = build_session_chain(&self.ssh_jumps).await?;
         let final_handle = Arc::clone(sessions.last().expect("chain has at least one session"));
 
         // 2. Bind localhost listener; capture it BEFORE spawning so we
@@ -187,25 +165,26 @@ impl Tunnel for SocksTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::JumpHop;
+
+    fn hop(host: &str) -> JumpHop {
+        JumpHop {
+            host: host.to_string(),
+            user: "u".to_string(),
+            password: Some("p".to_string()),
+            key_path: None,
+            port: 22,
+        }
+    }
 
     #[test]
     fn new_rejects_empty_jumps() {
-        assert!(matches!(
-            SocksTunnel::new(vec![], "u".into(), None, None, 22),
-            Err(Error::Config(_))
-        ));
+        assert!(matches!(SocksTunnel::new(vec![]), Err(Error::Config(_))));
     }
 
     #[test]
     fn new_accepts_single_jump_inactive() {
-        let t = SocksTunnel::new(
-            vec!["bastion.com".into()],
-            "u".into(),
-            Some("p".into()),
-            None,
-            22,
-        )
-        .unwrap();
+        let t = SocksTunnel::new(vec![hop("bastion.com")]).unwrap();
         assert!(!t.is_active());
     }
 }

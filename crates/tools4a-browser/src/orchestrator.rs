@@ -68,13 +68,7 @@ impl Service for BrowserOrchestrator {
     ) -> Result<ExecutionResult> {
         match tunnel {
             None | Some(TunnelConfig::Direct) => execute(req).await,
-            Some(TunnelConfig::Ssh {
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port,
-            }) => {
+            Some(TunnelConfig::Ssh { ssh_jumps }) => {
                 if req.proxy.is_some() {
                     return Err(Error::Config(
                         "tunnel=ssh and an explicit `proxy` field conflict: \
@@ -85,13 +79,7 @@ impl Service for BrowserOrchestrator {
                     ));
                 }
 
-                let mut t = SocksTunnel::new(
-                    ssh_jumps,
-                    ssh_user,
-                    ssh_password,
-                    ssh_key_path.map(std::path::PathBuf::from),
-                    ssh_port,
-                )?;
+                let mut t = SocksTunnel::new(ssh_jumps)?;
                 let endpoint = t.establish().await?;
                 req.proxy = Some(format!("socks5://{}:{}", endpoint.host, endpoint.port));
 
@@ -151,16 +139,19 @@ mod tests {
 
     #[tokio::test]
     async fn errors_when_user_proxy_conflicts_with_ssh_tunnel() {
+        use tools4a_core::JumpHop;
         let mut r = req();
         r.proxy = Some("socks5://example.com:1080".into());
         let err = BrowserOrchestrator::execute(
             r,
             Some(TunnelConfig::Ssh {
-                ssh_jumps: vec!["bastion.example.com".to_string()],
-                ssh_user: "admin".to_string(),
-                ssh_password: None,
-                ssh_key_path: None,
-                ssh_port: 22,
+                ssh_jumps: vec![JumpHop {
+                    host: "bastion.example.com".to_string(),
+                    user: "admin".to_string(),
+                    password: None,
+                    key_path: None,
+                    port: 22,
+                }],
             }),
         )
         .await

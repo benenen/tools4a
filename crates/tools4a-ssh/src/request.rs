@@ -25,16 +25,3 @@ pub struct SshExecRequest {
     /// CLI/MCP layer. Env var still wins over this.
     pub max_timeout_secs: Option<u64>,
 }
-
-/// Optional SSH-jump config: a chain of bastion hosts plus the credentials
-/// to authenticate to ALL of them (per-hop overrides aren't supported yet).
-/// When `None` is passed to `execute`, the target SSH server is reached
-/// directly.
-#[derive(Debug, Clone)]
-pub struct SshJumpsConfig {
-    pub jumps: Vec<String>,
-    pub user: String,
-    pub password: Option<String>,
-    pub key_path: Option<std::path::PathBuf>,
-    pub port: u16,
-}

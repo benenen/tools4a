@@ -8,7 +8,8 @@ use tokio::sync::Mutex;
 use tools4a_core::{Error, ExecutionResult, Result};
 
 use crate::exec::{SshExec, output_to_result};
-use crate::request::{SshExecRequest, SshJumpsConfig};
+use crate::request::SshExecRequest;
+use tools4a_core::JumpHop;
 use tools4a_core::session::{AcceptAnyHostKey, authenticate, build_session_chain};
 
 /// Run a single shell command on the SSH target described by `req`,
@@ -22,23 +23,14 @@ use tools4a_core::session::{AcceptAnyHostKey, authenticate, build_session_chain}
 /// target name (not `127.0.0.1`).
 pub async fn execute(
     req: SshExecRequest,
-    jumps: Option<SshJumpsConfig>,
+    jumps: Option<Vec<JumpHop>>,
     connect_addr_override: Option<(String, u16)>,
 ) -> Result<ExecutionResult> {
     let cfg = std::sync::Arc::new(client::Config::default());
 
     // Build the jump chain (if any). Returns the last jump's session.
     let mut jump_sessions = match &jumps {
-        Some(j) if !j.jumps.is_empty() => {
-            build_session_chain(
-                &j.jumps,
-                &j.user,
-                j.password.as_deref(),
-                j.key_path.as_deref(),
-                j.port,
-            )
-            .await?
-        }
+        Some(hops) if !hops.is_empty() => build_session_chain(hops).await?,
         _ => Vec::new(),
     };
 

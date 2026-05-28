@@ -161,24 +161,29 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
             let raw_jump = ssh.ssh_jump.clone().ok_or_else(|| {
                 Error::Config("--ssh-jump is required when --tunnel=ssh".to_string())
             })?;
-            let ssh_jumps: Vec<String> = raw_jump
+            let host_jumps: Vec<String> = raw_jump
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            if ssh_jumps.is_empty() {
+            if host_jumps.is_empty() {
                 return Err(Error::Config("--ssh-jump must not be empty".to_string()));
             }
             let ssh_user = ssh.ssh_user.clone().ok_or_else(|| {
                 Error::Config("--ssh-user is required when --tunnel=ssh".to_string())
             })?;
-            Ok(Some(TunnelConfig::Ssh {
-                ssh_jumps,
-                ssh_user,
-                ssh_password: ssh.ssh_password.clone(),
-                ssh_key_path: ssh.ssh_key_path.clone(),
-                ssh_port: ssh.ssh_port.unwrap_or(22),
-            }))
+            let port = ssh.ssh_port.unwrap_or(22);
+            let ssh_jumps: Vec<tools4a_core::JumpHop> = host_jumps
+                .into_iter()
+                .map(|host| tools4a_core::JumpHop {
+                    host,
+                    user: ssh_user.clone(),
+                    password: ssh.ssh_password.clone(),
+                    key_path: ssh.ssh_key_path.clone(),
+                    port,
+                })
+                .collect();
+            Ok(Some(TunnelConfig::Ssh { ssh_jumps }))
         }
         TunnelKind::Socks5 => {
             if stray_ssh {

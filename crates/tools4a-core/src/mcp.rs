@@ -103,10 +103,10 @@ pub fn build_tunnel_config(
                     "socks5_* fields are only valid with tunnel = \"socks5\"".to_string(),
                 ));
             }
-            let jumps = ssh_jump.map(SshJumpInput::into_jumps).ok_or_else(|| {
+            let host_jumps = ssh_jump.map(SshJumpInput::into_jumps).ok_or_else(|| {
                 crate::Error::Config("ssh_jump is required when tunnel = \"ssh\"".to_string())
             })?;
-            if jumps.is_empty() {
+            if host_jumps.is_empty() {
                 return Err(crate::Error::Config(
                     "ssh_jump must not be empty".to_string(),
                 ));
@@ -114,13 +114,18 @@ pub fn build_tunnel_config(
             let ssh_user = ssh_user.ok_or_else(|| {
                 crate::Error::Config("ssh_user is required when tunnel = \"ssh\"".to_string())
             })?;
-            Ok(Some(TunnelConfig::Ssh {
-                ssh_jumps: jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port: ssh_port.unwrap_or(22),
-            }))
+            let port = ssh_port.unwrap_or(22);
+            let ssh_jumps: Vec<crate::JumpHop> = host_jumps
+                .into_iter()
+                .map(|host| crate::JumpHop {
+                    host,
+                    user: ssh_user.clone(),
+                    password: ssh_password.clone(),
+                    key_path: ssh_key_path.clone(),
+                    port,
+                })
+                .collect();
+            Ok(Some(TunnelConfig::Ssh { ssh_jumps }))
         }
         TunnelKind::Socks5 => {
             if stray_ssh {

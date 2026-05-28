@@ -87,41 +87,15 @@ async fn resolve_target(
 ) -> Result<(ConnectTarget, Option<ActiveTunnel>)> {
     match (tunnel_config, req.unix_socket.as_deref()) {
         // Remote Unix socket via SSH.
-        (
-            Some(TunnelConfig::Ssh {
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port,
-            }),
-            Some(socket_path),
-        ) => {
-            let key_path = ssh_key_path.map(std::path::PathBuf::from);
-            let mut tunnel = StreamLocalTunnel::new(
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                key_path,
-                ssh_port,
-                socket_path.to_string(),
-            )?;
+        (Some(TunnelConfig::Ssh { ssh_jumps }), Some(socket_path)) => {
+            let mut tunnel = StreamLocalTunnel::new(ssh_jumps, socket_path.to_string())?;
             let ep = tunnel.establish().await?;
             let addr = format!("{}:{}", ep.host, ep.port);
             let boxed: Box<dyn Tunnel> = Box::new(tunnel);
             Ok((ConnectTarget::Tcp(addr), Some(Arc::new(Mutex::new(boxed)))))
         }
         // Remote TCP via SSH.
-        (
-            Some(TunnelConfig::Ssh {
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port,
-            }),
-            None,
-        ) => {
+        (Some(TunnelConfig::Ssh { ssh_jumps }), None) => {
             let target = parse_docker_host(&req.docker_host)?;
             let (host, port) = match target {
                 ConnectTarget::Tcp(addr) => parse_host_port(&addr)?,
@@ -133,16 +107,7 @@ async fn resolve_target(
                     ));
                 }
             };
-            let key_path = ssh_key_path.map(std::path::PathBuf::from);
-            let mut tunnel = SshTunnel::new(
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                key_path,
-                ssh_port,
-                host,
-                port,
-            )?;
+            let mut tunnel = SshTunnel::new(ssh_jumps, host, port)?;
             let ep = tunnel.establish().await?;
             let addr = format!("{}:{}", ep.host, ep.port);
             let boxed: Box<dyn Tunnel> = Box::new(tunnel);

@@ -13,4 +13,4 @@ pub use exec::{SshExec, SshOutput, output_to_result};
 pub use execute::execute;
 pub use mcp::{SshExecParams, SshMcp};
 pub use orchestrator::SshDirectOrchestrator;
-pub use request::{SshExecRequest, SshJumpsConfig};
+pub use request::SshExecRequest;

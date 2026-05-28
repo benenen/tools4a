@@ -3,7 +3,7 @@
 use crate::cli::TunnelServeType;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tools4a_core::{Error, Result, SocksTunnel, SshTunnel, StreamLocalTunnel, Tunnel};
+use tools4a_core::{Error, JumpHop, Result, SocksTunnel, SshTunnel, StreamLocalTunnel, Tunnel};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
@@ -18,16 +18,28 @@ pub(super) async fn execute(
     target_port: Option<u16>,
     remote_socket: Option<String>,
 ) -> Result<()> {
-    let jumps: Vec<String> = ssh_jump
+    let host_jumps: Vec<String> = ssh_jump
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if jumps.is_empty() {
+    if host_jumps.is_empty() {
         return Err(Error::Config(
             "--ssh-jump must not be empty (single host or comma-separated chain)".to_string(),
         ));
     }
+    let jumps: Vec<JumpHop> = host_jumps
+        .into_iter()
+        .map(|host| JumpHop {
+            host,
+            user: ssh_user.clone(),
+            password: ssh_password.clone(),
+            key_path: ssh_key_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            port: ssh_port,
+        })
+        .collect();
 
     // Validate per-type required + rejected fields.
     match kind {
@@ -68,33 +80,16 @@ pub(super) async fn execute(
     // Build the right tunnel impl and establish.
     let mut tunnel: Box<dyn Tunnel> = match kind {
         TunnelServeType::SshTcp => {
-            let t = SshTunnel::new(
-                jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port,
-                target_host.unwrap(),
-                target_port.unwrap(),
-            )?
-            .with_listen_addr(listen);
+            let t = SshTunnel::new(jumps, target_host.unwrap(), target_port.unwrap())?
+                .with_listen_addr(listen);
             Box::new(t)
         }
         TunnelServeType::SshStreamlocal => {
-            let t = StreamLocalTunnel::new(
-                jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port,
-                remote_socket.unwrap(),
-            )?
-            .with_listen_addr(listen);
+            let t = StreamLocalTunnel::new(jumps, remote_socket.unwrap())?.with_listen_addr(listen);
             Box::new(t)
         }
         TunnelServeType::SshSocks => {
-            let t = SocksTunnel::new(jumps, ssh_user, ssh_password, ssh_key_path, ssh_port)?
-                .with_listen_addr(listen);
+            let t = SocksTunnel::new(jumps)?.with_listen_addr(listen);
             Box::new(t)
         }
     };

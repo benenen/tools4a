@@ -6,7 +6,7 @@
 //! directly from CLI flags / JSON params.
 
 use crate::execute as ssh_execute;
-use crate::request::{SshExecRequest, SshJumpsConfig};
+use crate::request::SshExecRequest;
 use async_trait::async_trait;
 use tools4a_core::{
     Error, ExecutionResult, Result, Service, Socks5ClientTunnel, Tunnel, TunnelConfig,
@@ -45,23 +45,7 @@ impl Service for SshDirectOrchestrator {
         //    russh dial to its endpoint via `connect_addr_override`.
         let (jumps, mut socks_tunnel, connect_override) = match tunnel_config {
             None | Some(TunnelConfig::Direct) => (None, None, None),
-            Some(TunnelConfig::Ssh {
-                ssh_jumps,
-                ssh_user,
-                ssh_password,
-                ssh_key_path,
-                ssh_port,
-            }) => (
-                Some(SshJumpsConfig {
-                    jumps: ssh_jumps,
-                    user: ssh_user,
-                    password: ssh_password,
-                    key_path: ssh_key_path.map(std::path::PathBuf::from),
-                    port: ssh_port,
-                }),
-                None,
-                None,
-            ),
+            Some(TunnelConfig::Ssh { ssh_jumps }) => (Some(ssh_jumps), None, None),
             Some(TunnelConfig::Socks5 {
                 socks5_host,
                 socks5_port,

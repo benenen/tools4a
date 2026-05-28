@@ -9,11 +9,7 @@ use tokio::sync::Mutex;
 /// `ssh_jumps` (in client→target order) and exposes a local TCP
 /// endpoint on 127.0.0.1 that forwards to `(target_host, target_port)`.
 pub struct SshTunnel {
-    ssh_jumps: Vec<String>,
-    ssh_user: String,
-    ssh_password: Option<String>,
-    ssh_key_path: Option<std::path::PathBuf>,
-    ssh_port: u16,
+    ssh_jumps: Vec<crate::JumpHop>,
     target_host: String,
     target_port: u16,
     /// Optional fixed listen address. `None` → bind 127.0.0.1:0 (random
@@ -38,11 +34,7 @@ struct SshTunnelState {
 
 impl SshTunnel {
     pub fn new(
-        ssh_jumps: Vec<String>,
-        ssh_user: String,
-        ssh_password: Option<String>,
-        ssh_key_path: Option<std::path::PathBuf>,
-        ssh_port: u16,
+        ssh_jumps: Vec<crate::JumpHop>,
         target_host: String,
         target_port: u16,
     ) -> Result<Self> {
@@ -53,10 +45,6 @@ impl SshTunnel {
         }
         Ok(Self {
             ssh_jumps,
-            ssh_user,
-            ssh_password,
-            ssh_key_path,
-            ssh_port,
             target_host,
             target_port,
             listen_addr: None,
@@ -82,14 +70,7 @@ impl Tunnel for SshTunnel {
         }
 
         // Build SSH session chain via the shared helper in tools4a-ssh.
-        let sessions = build_session_chain(
-            &self.ssh_jumps,
-            &self.ssh_user,
-            self.ssh_password.as_deref(),
-            self.ssh_key_path.as_deref(),
-            self.ssh_port,
-        )
-        .await?;
+        let sessions = build_session_chain(&self.ssh_jumps).await?;
         let final_handle = Arc::clone(sessions.last().expect("chain has at least one session"));
 
         // Bind local listener and capture port BEFORE spawning so we can
@@ -192,42 +173,35 @@ async fn forward_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::JumpHop;
+
+    fn hop(host: &str) -> JumpHop {
+        JumpHop {
+            host: host.to_string(),
+            user: "u".to_string(),
+            password: Some("p".to_string()),
+            key_path: None,
+            port: 22,
+        }
+    }
 
     #[test]
     fn test_new_rejects_empty_jumps() {
         assert!(matches!(
-            SshTunnel::new(vec![], "u".into(), None, None, 22, "t".into(), 3306),
+            SshTunnel::new(vec![], "t".into(), 3306),
             Err(Error::Config(_))
         ));
     }
 
     #[test]
     fn test_new_accepts_single_jump() {
-        let t = SshTunnel::new(
-            vec!["bastion.com".into()],
-            "u".into(),
-            Some("p".into()),
-            None,
-            22,
-            "mysql.internal".into(),
-            3306,
-        )
-        .unwrap();
+        let t = SshTunnel::new(vec![hop("bastion.com")], "mysql.internal".into(), 3306).unwrap();
         assert!(!t.is_active());
     }
 
     #[tokio::test]
     async fn test_ssh_tunnel_state_starts_inactive() {
-        let t = SshTunnel::new(
-            vec!["bastion".into()],
-            "u".into(),
-            Some("p".into()),
-            None,
-            22,
-            "target".into(),
-            3306,
-        )
-        .unwrap();
+        let t = SshTunnel::new(vec![hop("bastion")], "target".into(), 3306).unwrap();
         assert!(!t.is_active());
     }
 }

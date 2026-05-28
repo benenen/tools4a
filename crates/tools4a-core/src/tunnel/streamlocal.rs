@@ -21,11 +21,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct StreamLocalTunnel {
-    ssh_jumps: Vec<String>,
-    ssh_user: String,
-    ssh_password: Option<String>,
-    ssh_key_path: Option<std::path::PathBuf>,
-    ssh_port: u16,
+    ssh_jumps: Vec<crate::JumpHop>,
     remote_socket_path: String,
     /// Optional fixed listen address. `None` → 127.0.0.1:0 (random).
     /// `Some` set via `with_listen_addr` for Phase 16 `tunnel-serve` daemon.
@@ -46,14 +42,7 @@ struct StreamLocalTunnelState {
 }
 
 impl StreamLocalTunnel {
-    pub fn new(
-        ssh_jumps: Vec<String>,
-        ssh_user: String,
-        ssh_password: Option<String>,
-        ssh_key_path: Option<std::path::PathBuf>,
-        ssh_port: u16,
-        remote_socket_path: String,
-    ) -> Result<Self> {
+    pub fn new(ssh_jumps: Vec<crate::JumpHop>, remote_socket_path: String) -> Result<Self> {
         if ssh_jumps.is_empty() {
             return Err(Error::Config(
                 "StreamLocalTunnel requires at least one jump host".to_string(),
@@ -66,10 +55,6 @@ impl StreamLocalTunnel {
         }
         Ok(Self {
             ssh_jumps,
-            ssh_user,
-            ssh_password,
-            ssh_key_path,
-            ssh_port,
             remote_socket_path,
             listen_addr: None,
             state: None,
@@ -93,14 +78,7 @@ impl Tunnel for StreamLocalTunnel {
             ));
         }
 
-        let sessions = build_session_chain(
-            &self.ssh_jumps,
-            &self.ssh_user,
-            self.ssh_password.as_deref(),
-            self.ssh_key_path.as_deref(),
-            self.ssh_port,
-        )
-        .await?;
+        let sessions = build_session_chain(&self.ssh_jumps).await?;
         let final_handle = Arc::clone(sessions.last().expect("chain has at least one session"));
 
         let bind: SocketAddr = self
@@ -198,18 +176,22 @@ async fn forward_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::JumpHop;
+
+    fn hop(host: &str) -> JumpHop {
+        JumpHop {
+            host: host.to_string(),
+            user: "u".to_string(),
+            password: Some("p".to_string()),
+            key_path: None,
+            port: 22,
+        }
+    }
 
     #[test]
     fn test_new_rejects_empty_jumps() {
         assert!(matches!(
-            StreamLocalTunnel::new(
-                vec![],
-                "u".into(),
-                None,
-                None,
-                22,
-                "/var/run/docker.sock".into()
-            ),
+            StreamLocalTunnel::new(vec![], "/var/run/docker.sock".into()),
             Err(Error::Config(_))
         ));
     }
@@ -217,43 +199,22 @@ mod tests {
     #[test]
     fn test_new_rejects_empty_socket_path() {
         assert!(matches!(
-            StreamLocalTunnel::new(
-                vec!["bastion.com".into()],
-                "u".into(),
-                None,
-                None,
-                22,
-                String::new()
-            ),
+            StreamLocalTunnel::new(vec![hop("bastion.com")], String::new()),
             Err(Error::Config(_))
         ));
     }
 
     #[test]
     fn test_new_accepts_valid_input() {
-        let t = StreamLocalTunnel::new(
-            vec!["bastion.com".into()],
-            "u".into(),
-            Some("p".into()),
-            None,
-            22,
-            "/var/run/docker.sock".into(),
-        )
-        .unwrap();
+        let t = StreamLocalTunnel::new(vec![hop("bastion.com")], "/var/run/docker.sock".into())
+            .unwrap();
         assert!(!t.is_active());
     }
 
     #[tokio::test]
     async fn test_state_starts_inactive() {
-        let t = StreamLocalTunnel::new(
-            vec!["bastion".into()],
-            "u".into(),
-            Some("p".into()),
-            None,
-            22,
-            "/var/run/docker.sock".into(),
-        )
-        .unwrap();
+        let t =
+            StreamLocalTunnel::new(vec![hop("bastion")], "/var/run/docker.sock".into()).unwrap();
         assert!(!t.is_active());
     }
 }

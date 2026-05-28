@@ -180,6 +180,21 @@ impl ExecutionResult {
 
 // -- TunnelConfig -------------------------------------------------------
 
+/// One resolved hop in an SSH jump chain. Post-merge: `user` is required,
+/// `port` is concrete (defaulted to 22 if absent), `password`/`key_path`
+/// stay optional because either may carry auth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpHop {
+    pub host: String,
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+}
+
 /// Tunnel selection plus its parameters. Shared shape across all services.
 /// Runtime impls (`DirectTunnel`, `SshTunnel`, `Socks5ClientTunnel`) live
 /// in this crate's `tunnel` module.
@@ -188,17 +203,11 @@ impl ExecutionResult {
 pub enum TunnelConfig {
     Direct,
     Ssh {
-        /// One or more jump hosts in client→target order. YAML/TOML accepts
-        /// either a single string (legacy single-hop) or a sequence of strings.
-        #[serde(rename = "ssh_jump", deserialize_with = "deserialize_string_or_vec")]
-        ssh_jumps: Vec<String>,
-        ssh_user: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ssh_password: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ssh_key_path: Option<String>,
-        #[serde(default = "default_ssh_port")]
-        ssh_port: u16,
+        /// Resolved jump-hop list in client→target order. Each hop carries
+        /// its own credentials. The MCP and CLI builders fold pre-merge
+        /// top-level `ssh_user`/`ssh_password`/etc. into each hop before
+        /// constructing this; consumers see a fully-resolved per-hop view.
+        ssh_jumps: Vec<JumpHop>,
     },
     /// Route through an already-running external SOCKS5 proxy. Phase 19.
     Socks5 {
@@ -218,22 +227,6 @@ fn default_ssh_port() -> u16 {
 
 fn default_socks5_port() -> u16 {
     1080
-}
-
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        String(String),
-        Vec(Vec<String>),
-    }
-    match StringOrVec::deserialize(deserializer)? {
-        StringOrVec::String(s) => Ok(vec![s]),
-        StringOrVec::Vec(v) => Ok(v),
-    }
 }
 
 // -- Service trait ------------------------------------------------------
@@ -257,42 +250,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tunnel_config_ssh_accepts_string_for_jump() {
-        let yaml = r#"
-type: ssh
-ssh_jump: bastion.com
-ssh_user: admin
-"#;
-        let cfg: TunnelConfig = serde_yml::from_str(yaml).unwrap();
-        match cfg {
-            TunnelConfig::Ssh {
-                ssh_jumps,
-                ssh_user,
-                ..
-            } => {
-                assert_eq!(ssh_jumps, vec!["bastion.com".to_string()]);
-                assert_eq!(ssh_user, "admin");
-            }
-            _ => panic!("expected Ssh"),
-        }
-    }
-
-    #[test]
-    fn test_tunnel_config_ssh_accepts_array_for_jump() {
-        let yaml = r#"
-type: ssh
-ssh_jump:
-  - bastion1.com
-  - bastion2.com
-ssh_user: admin
-"#;
-        let cfg: TunnelConfig = serde_yml::from_str(yaml).unwrap();
-        match cfg {
-            TunnelConfig::Ssh { ssh_jumps, .. } => {
-                assert_eq!(
-                    ssh_jumps,
-                    vec!["bastion1.com".to_string(), "bastion2.com".to_string()]
-                );
+    fn test_tunnel_config_ssh_round_trips_via_yaml() {
+        // TunnelConfig::Ssh now holds Vec<JumpHop>; we construct and
+        // serialize/deserialize rather than parsing legacy YAML.
+        let hop = JumpHop {
+            host: "bastion.com".to_string(),
+            user: "admin".to_string(),
+            password: Some("pw".to_string()),
+            key_path: None,
+            port: 22,
+        };
+        let cfg = TunnelConfig::Ssh {
+            ssh_jumps: vec![hop],
+        };
+        let yaml = serde_yml::to_string(&cfg).unwrap();
+        let back: TunnelConfig = serde_yml::from_str(&yaml).unwrap();
+        match back {
+            TunnelConfig::Ssh { ssh_jumps } => {
+                assert_eq!(ssh_jumps.len(), 1);
+                assert_eq!(ssh_jumps[0].host, "bastion.com");
+                assert_eq!(ssh_jumps[0].user, "admin");
             }
             _ => panic!("expected Ssh"),
         }

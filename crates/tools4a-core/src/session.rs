@@ -89,57 +89,73 @@ pub async fn authenticate(
 /// session whose direct-tcpip channel can be used to reach the next hop
 /// (or the final TCP/SSH target).
 ///
-/// All hops share `user`/`password`/`key_path`/`port`. (Per-hop overrides
-/// are deferred to a future phase.)
+/// Each `JumpHop` carries its own credentials and port — the chain no
+/// longer requires all hops to share one set of credentials.
 ///
 /// `jumps` must not be empty — caller validates.
 pub async fn build_session_chain(
-    jumps: &[String],
-    user: &str,
-    password: Option<&str>,
-    key_path: Option<&std::path::Path>,
-    port: u16,
+    jumps: &[crate::JumpHop],
 ) -> Result<Vec<Arc<Mutex<client::Handle<AcceptAnyHostKey>>>>> {
     let cfg = std::sync::Arc::new(client::Config::default());
     let mut sessions: Vec<Arc<Mutex<client::Handle<AcceptAnyHostKey>>>> =
         Vec::with_capacity(jumps.len());
 
     // Hop 0: TCP-connect directly.
-    let first_jump = &jumps[0];
+    let first = &jumps[0];
     let handler = AcceptAnyHostKey {
-        label: first_jump.clone(),
+        label: first.host.clone(),
     };
-    let mut session = client::connect(cfg.clone(), (first_jump.as_str(), port), handler)
+    let mut session = client::connect(cfg.clone(), (first.host.as_str(), first.port), handler)
         .await
-        .map_err(|e| Error::Connection(format!("SSH connect to {first_jump} failed: {e}")))?;
-    authenticate(&mut session, user, password, key_path).await?;
+        .map_err(|e| {
+            Error::Connection(format!(
+                "SSH connect to {}:{} failed: {e}",
+                first.host, first.port
+            ))
+        })?;
+    authenticate(
+        &mut session,
+        &first.user,
+        first.password.as_deref(),
+        first.key_path.as_deref().map(std::path::Path::new),
+    )
+    .await?;
     sessions.push(Arc::new(Mutex::new(session)));
 
     // Hop 1..N: each over a direct-tcpip channel of the prior session.
-    for next_jump in jumps.iter().skip(1) {
+    for next in jumps.iter().skip(1) {
         let prev = sessions.last().expect("at least one session");
         let channel = prev
             .lock()
             .await
-            .channel_open_direct_tcpip(next_jump.clone(), port as u32, "127.0.0.1", 0u32)
+            .channel_open_direct_tcpip(next.host.clone(), next.port as u32, "127.0.0.1", 0u32)
             .await
             .map_err(|e| {
                 Error::Connection(format!(
-                    "open direct-tcpip to {next_jump}:{port} via prior hop failed: {e}"
+                    "open direct-tcpip to {}:{} via prior hop failed: {e}",
+                    next.host, next.port
                 ))
             })?;
         // ChannelStream is not Unpin; box-pin so connect_stream's bound holds.
         let stream = Box::pin(channel.into_stream());
-
         let handler = AcceptAnyHostKey {
-            label: next_jump.clone(),
+            label: next.host.clone(),
         };
         let mut session = client::connect_stream(cfg.clone(), stream, handler)
             .await
             .map_err(|e| {
-                Error::Connection(format!("SSH connect to {next_jump} (chained) failed: {e}"))
+                Error::Connection(format!(
+                    "SSH connect to {} (chained) failed: {e}",
+                    next.host
+                ))
             })?;
-        authenticate(&mut session, user, password, key_path).await?;
+        authenticate(
+            &mut session,
+            &next.user,
+            next.password.as_deref(),
+            next.key_path.as_deref().map(std::path::Path::new),
+        )
+        .await?;
         sessions.push(Arc::new(Mutex::new(session)));
     }
 
