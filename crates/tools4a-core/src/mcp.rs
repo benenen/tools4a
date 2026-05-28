@@ -70,8 +70,10 @@ pub struct SshJumpHopInput {
 
 /// Merge a pre-merge `SshJumpHopInput` against top-level defaults into a
 /// fully-resolved `JumpHop`. Used by both the MCP `build_tunnel_config`
-/// and the CLI `cli_to_tunnel_config`. `hop_index` is included in the
-/// error message for human-locatable validation failures.
+/// and the CLI `cli_to_tunnel_config`. `hop_index` is 0-based internally
+/// but rendered as 1-based ("ssh hop 1", "ssh hop 2", ...) in the
+/// validation error messages so users can locate the offending hop using
+/// the same counting convention they'd use in conversation.
 pub fn merge_hop(
     hop_index: usize,
     hop: SshJumpHopInput,
@@ -83,7 +85,7 @@ pub fn merge_hop(
     if hop.host.is_empty() {
         return Err(crate::Error::Config(format!(
             "ssh hop {}: host must not be empty",
-            hop_index
+            hop_index + 1
         )));
     }
     let user = hop
@@ -92,7 +94,8 @@ pub fn merge_hop(
         .ok_or_else(|| {
             crate::Error::Config(format!(
                 "ssh hop {} ({}): missing user — set hop.user or top-level ssh_user",
-                hop_index, hop.host
+                hop_index + 1,
+                hop.host
             ))
         })?;
     Ok(crate::JumpHop {
@@ -572,7 +575,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, crate::Error::Config(ref m)
-            if m.contains("ssh hop 0") && m.contains("missing user")));
+            if m.contains("ssh hop 1") && m.contains("missing user")));
     }
 
     #[test]

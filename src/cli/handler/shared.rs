@@ -194,7 +194,7 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
                         .enumerate()
                         .map(|(i, raw)| {
                             serde_json::from_str::<SshJumpHopInput>(raw).map_err(|e| {
-                                Error::Config(format!("--ssh-hop #{i} parse failed: {e}"))
+                                Error::Config(format!("--ssh-hop #{} parse failed: {e}", i + 1))
                             })
                         })
                         .collect::<Result<Vec<_>>>()?,
