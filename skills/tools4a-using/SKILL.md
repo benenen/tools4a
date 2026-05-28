@@ -15,7 +15,7 @@ description: Use when calling any of the eight tools4a MCP tools (`mysql_exec` /
 | `redis_exec` | `command` + `host` | yes | yes |
 | `mongo_exec` | `command` + `host` + `database` | yes | yes |
 | `http_exec` | `method` + `url` | yes | no |
-| `ssh_exec` | `command` + `host` + `user` + (`password` OR `key_path`) | yes | no |
+| `ssh_exec` | `command` + `host` + `user` + (`password` OR `key_path`) | yes (incl. SOCKS5) | no |
 | `browser_exec` | `subcommand` | yes (SOCKS5 over SSH) | no |
 
 ## Tool input shapes
@@ -90,6 +90,8 @@ All hops share the same `ssh_user` / `ssh_password` / `ssh_key_path` / `ssh_port
 For **`ssh_exec`** specifically: the TARGET creds (`user`, `password` / `key_path`, `port`) and the JUMP creds (`ssh_*`) are independent. The tool never infers one from the other — supply both even when they happen to be the same.
 
 For **`http_exec`** through SSH: TLS SNI / Host header / cert verification all use the URL's original hostname; the tunnel only redirects DNS to a local listener. HTTPS-via-tunnel works without TLS surgery.
+
+For **`ssh_exec` through SOCKS5**: set `tunnel="socks5"` + `socks5_host` / `socks5_port` (+ optional `socks5_user` / `socks5_password`). tools4a stands up a local Socks5ClientTunnel pointed at the SSH target, then runs the SSH handshake over it. The host-key warning still names the real target host (not `127.0.0.1`), and target credentials authenticate the SSH session as usual — the proxy only carries TCP.
 
 ## Output mapping
 
