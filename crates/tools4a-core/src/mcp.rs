@@ -39,6 +39,7 @@ pub enum TunnelKind {
 pub enum SshJumpInput {
     Single(String),
     Multiple(Vec<String>),
+    Detailed(Vec<SshJumpHopInput>),
 }
 
 impl SshJumpInput {
@@ -50,8 +51,61 @@ impl SshJumpInput {
                 .filter(|p| !p.is_empty())
                 .collect(),
             SshJumpInput::Multiple(v) => v.into_iter().filter(|s| !s.is_empty()).collect(),
+            SshJumpInput::Detailed(v) => v.into_iter().map(|h| h.host).collect(),
         }
     }
+}
+
+/// One pre-merge jump hop in the MCP `ssh_jump` object form. Fields
+/// that are `None` fall back to the call's top-level `ssh_user` /
+/// `ssh_password` / `ssh_key_path` / `ssh_port` defaults.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SshJumpHopInput {
+    pub host: String,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub key_path: Option<String>,
+    pub port: Option<u16>,
+}
+
+/// Merge a pre-merge `SshJumpHopInput` against top-level defaults into a
+/// fully-resolved `JumpHop`. Used by both the MCP `build_tunnel_config`
+/// and the CLI `cli_to_tunnel_config`. `hop_index` is included in the
+/// error message for human-locatable validation failures.
+pub fn merge_hop(
+    hop_index: usize,
+    hop: SshJumpHopInput,
+    default_user: Option<&str>,
+    default_password: Option<&str>,
+    default_key_path: Option<&str>,
+    default_port: u16,
+) -> crate::Result<crate::JumpHop> {
+    if hop.host.is_empty() {
+        return Err(crate::Error::Config(format!(
+            "ssh hop {}: host must not be empty",
+            hop_index
+        )));
+    }
+    let user = hop
+        .user
+        .or_else(|| default_user.map(str::to_string))
+        .ok_or_else(|| {
+            crate::Error::Config(format!(
+                "ssh hop {} ({}): missing user — set hop.user or top-level ssh_user",
+                hop_index, hop.host
+            ))
+        })?;
+    Ok(crate::JumpHop {
+        host: hop.host,
+        user,
+        password: hop
+            .password
+            .or_else(|| default_password.map(str::to_string)),
+        key_path: hop
+            .key_path
+            .or_else(|| default_key_path.map(str::to_string)),
+        port: hop.port.unwrap_or(default_port),
+    })
 }
 
 /// Build a `TunnelConfig` from the shared MCP tunnel-related fields.
@@ -103,28 +157,43 @@ pub fn build_tunnel_config(
                     "socks5_* fields are only valid with tunnel = \"socks5\"".to_string(),
                 ));
             }
-            let host_jumps = ssh_jump.map(SshJumpInput::into_jumps).ok_or_else(|| {
+            let raw = ssh_jump.ok_or_else(|| {
                 crate::Error::Config("ssh_jump is required when tunnel = \"ssh\"".to_string())
             })?;
-            if host_jumps.is_empty() {
+            let default_port = ssh_port.unwrap_or(22);
+            let hop_inputs: Vec<SshJumpHopInput> = match raw {
+                SshJumpInput::Single(_) | SshJumpInput::Multiple(_) => raw
+                    .into_jumps()
+                    .into_iter()
+                    .map(|host| SshJumpHopInput {
+                        host,
+                        user: None,
+                        password: None,
+                        key_path: None,
+                        port: None,
+                    })
+                    .collect(),
+                SshJumpInput::Detailed(v) => v,
+            };
+            if hop_inputs.is_empty() {
                 return Err(crate::Error::Config(
                     "ssh_jump must not be empty".to_string(),
                 ));
             }
-            let ssh_user = ssh_user.ok_or_else(|| {
-                crate::Error::Config("ssh_user is required when tunnel = \"ssh\"".to_string())
-            })?;
-            let port = ssh_port.unwrap_or(22);
-            let ssh_jumps: Vec<crate::JumpHop> = host_jumps
+            let ssh_jumps: Vec<crate::JumpHop> = hop_inputs
                 .into_iter()
-                .map(|host| crate::JumpHop {
-                    host,
-                    user: ssh_user.clone(),
-                    password: ssh_password.clone(),
-                    key_path: ssh_key_path.clone(),
-                    port,
+                .enumerate()
+                .map(|(i, hop)| {
+                    merge_hop(
+                        i,
+                        hop,
+                        ssh_user.as_deref(),
+                        ssh_password.as_deref(),
+                        ssh_key_path.as_deref(),
+                        default_port,
+                    )
                 })
-                .collect();
+                .collect::<crate::Result<_>>()?;
             Ok(Some(TunnelConfig::Ssh { ssh_jumps }))
         }
         TunnelKind::Socks5 => {
@@ -359,5 +428,193 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, crate::Error::Config(ref msg) if msg.contains("set together")));
+    }
+
+    #[test]
+    fn merge_hop_overrides_top_level_when_hop_specifies() {
+        let hop = SshJumpHopInput {
+            host: "h".into(),
+            user: Some("hop-u".into()),
+            password: Some("hop-pw".into()),
+            key_path: None,
+            port: Some(2222),
+        };
+        let merged = merge_hop(0, hop, Some("default-u"), Some("default-pw"), None, 22).unwrap();
+        assert_eq!(merged.host, "h");
+        assert_eq!(merged.user, "hop-u");
+        assert_eq!(merged.password.as_deref(), Some("hop-pw"));
+        assert_eq!(merged.port, 2222);
+    }
+
+    #[test]
+    fn ssh_jump_detailed_form_parses_via_serde() {
+        let raw = r#"[
+            {"host":"gw","user":"admin","password":"pw1"},
+            {"host":"54","user":"xxjs","password":"pw2","port":2222}
+        ]"#;
+        let parsed: SshJumpInput = serde_json::from_str(raw).expect("detailed array should parse");
+        match parsed {
+            SshJumpInput::Detailed(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0].host, "gw");
+                assert_eq!(v[1].port, Some(2222));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_detailed_with_per_hop_creds_builds_two_distinct_jumphops() {
+        let cfg = build_tunnel_config(
+            Some(TunnelKind::Ssh),
+            Some(SshJumpInput::Detailed(vec![
+                SshJumpHopInput {
+                    host: "gw".into(),
+                    user: Some("admin".into()),
+                    password: Some("pw1".into()),
+                    key_path: None,
+                    port: None,
+                },
+                SshJumpHopInput {
+                    host: "54".into(),
+                    user: Some("xxjs".into()),
+                    password: Some("pw2".into()),
+                    key_path: None,
+                    port: Some(2222),
+                },
+            ])),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        match cfg {
+            TunnelConfig::Ssh { ssh_jumps } => {
+                assert_eq!(ssh_jumps.len(), 2);
+                assert_eq!(ssh_jumps[0].user, "admin");
+                assert_eq!(ssh_jumps[0].password.as_deref(), Some("pw1"));
+                assert_eq!(ssh_jumps[0].port, 22); // default
+                assert_eq!(ssh_jumps[1].user, "xxjs");
+                assert_eq!(ssh_jumps[1].password.as_deref(), Some("pw2"));
+                assert_eq!(ssh_jumps[1].port, 2222);
+            }
+            _ => panic!("expected Ssh"),
+        }
+    }
+
+    #[test]
+    fn ssh_detailed_falls_back_to_top_level_per_field() {
+        // hop[0] has user but no password → password comes from top-level
+        // hop[1] has password but no user → user comes from top-level
+        let cfg = build_tunnel_config(
+            Some(TunnelKind::Ssh),
+            Some(SshJumpInput::Detailed(vec![
+                SshJumpHopInput {
+                    host: "a".into(),
+                    user: Some("hop-u".into()),
+                    password: None,
+                    key_path: None,
+                    port: None,
+                },
+                SshJumpHopInput {
+                    host: "b".into(),
+                    user: None,
+                    password: Some("hop-pw".into()),
+                    key_path: None,
+                    port: None,
+                },
+            ])),
+            Some("top-u".into()),
+            Some("top-pw".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let TunnelConfig::Ssh { ssh_jumps } = cfg else {
+            panic!("expected Ssh")
+        };
+        assert_eq!(ssh_jumps[0].user, "hop-u");
+        assert_eq!(ssh_jumps[0].password.as_deref(), Some("top-pw"));
+        assert_eq!(ssh_jumps[1].user, "top-u");
+        assert_eq!(ssh_jumps[1].password.as_deref(), Some("hop-pw"));
+    }
+
+    #[test]
+    fn ssh_detailed_hop_with_no_user_and_no_default_errors() {
+        let err = build_tunnel_config(
+            Some(TunnelKind::Ssh),
+            Some(SshJumpInput::Detailed(vec![SshJumpHopInput {
+                host: "lonely".into(),
+                user: None,
+                password: Some("p".into()),
+                key_path: None,
+                port: None,
+            }])),
+            None, // no top-level ssh_user
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::Error::Config(ref m)
+            if m.contains("ssh hop 0") && m.contains("missing user")));
+    }
+
+    #[test]
+    fn ssh_detailed_hop_with_empty_host_errors() {
+        let err = build_tunnel_config(
+            Some(TunnelKind::Ssh),
+            Some(SshJumpInput::Detailed(vec![SshJumpHopInput {
+                host: "".into(),
+                user: Some("u".into()),
+                password: None,
+                key_path: None,
+                port: None,
+            }])),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::Error::Config(ref m)
+            if m.contains("host must not be empty")));
+    }
+
+    #[test]
+    fn ssh_detailed_empty_array_errors() {
+        let err = build_tunnel_config(
+            Some(TunnelKind::Ssh),
+            Some(SshJumpInput::Detailed(vec![])),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::Error::Config(ref m) if m.contains("must not be empty")));
     }
 }

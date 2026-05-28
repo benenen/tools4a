@@ -6,7 +6,10 @@
 
 use crate::cli::{Cli, TunnelKind};
 use tools4a_core::config::{Config, ConfigLoader, ConfigMerger, Profile, ServiceType, TomlConfig};
-use tools4a_core::{Error, ExecutionResult, Result, TunnelConfig};
+use tools4a_core::{
+    Error, ExecutionResult, JumpHop, Result, TunnelConfig,
+    mcp::{SshJumpHopInput, merge_hop},
+};
 
 /// 3-layer config build for typed-DB services (mysql/pgsql/clickhouse/mongo).
 #[allow(clippy::too_many_arguments)]
@@ -130,6 +133,7 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
     let ssh = &cli.ssh;
     let socks5 = &cli.socks5;
     let stray_ssh = ssh.ssh_jump.is_some()
+        || !ssh.ssh_hop.is_empty()
         || ssh.ssh_user.is_some()
         || ssh.ssh_password.is_some()
         || ssh.ssh_key_path.is_some()
@@ -158,31 +162,62 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
                     "SOCKS5 options (--socks5-*) are only valid with --tunnel=socks5".to_string(),
                 ));
             }
-            let raw_jump = ssh.ssh_jump.clone().ok_or_else(|| {
-                Error::Config("--ssh-jump is required when --tunnel=ssh".to_string())
-            })?;
-            let host_jumps: Vec<String> = raw_jump
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if host_jumps.is_empty() {
-                return Err(Error::Config("--ssh-jump must not be empty".to_string()));
+            let default_port = ssh.ssh_port.unwrap_or(22);
+            let hop_inputs: Vec<SshJumpHopInput> =
+                match (ssh.ssh_jump.as_deref(), ssh.ssh_hop.is_empty()) {
+                    (Some(_), false) => {
+                        return Err(Error::Config(
+                            "--ssh-jump and --ssh-hop are mutually exclusive — pick one"
+                                .to_string(),
+                        ));
+                    }
+                    (None, true) => {
+                        return Err(Error::Config(
+                            "--ssh-jump or --ssh-hop is required when --tunnel=ssh".to_string(),
+                        ));
+                    }
+                    (Some(raw), true) => raw
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .map(|host| SshJumpHopInput {
+                            host,
+                            user: None,
+                            password: None,
+                            key_path: None,
+                            port: None,
+                        })
+                        .collect(),
+                    (None, false) => ssh
+                        .ssh_hop
+                        .iter()
+                        .enumerate()
+                        .map(|(i, raw)| {
+                            serde_json::from_str::<SshJumpHopInput>(raw).map_err(|e| {
+                                Error::Config(format!("--ssh-hop #{i} parse failed: {e}"))
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                };
+            if hop_inputs.is_empty() {
+                return Err(Error::Config(
+                    "--ssh-jump / --ssh-hop must not be empty".to_string(),
+                ));
             }
-            let ssh_user = ssh.ssh_user.clone().ok_or_else(|| {
-                Error::Config("--ssh-user is required when --tunnel=ssh".to_string())
-            })?;
-            let port = ssh.ssh_port.unwrap_or(22);
-            let ssh_jumps: Vec<tools4a_core::JumpHop> = host_jumps
+            let ssh_jumps: Vec<JumpHop> = hop_inputs
                 .into_iter()
-                .map(|host| tools4a_core::JumpHop {
-                    host,
-                    user: ssh_user.clone(),
-                    password: ssh.ssh_password.clone(),
-                    key_path: ssh.ssh_key_path.clone(),
-                    port,
+                .enumerate()
+                .map(|(i, hop)| {
+                    merge_hop(
+                        i,
+                        hop,
+                        ssh.ssh_user.as_deref(),
+                        ssh.ssh_password.as_deref(),
+                        ssh.ssh_key_path.as_deref(),
+                        default_port,
+                    )
                 })
-                .collect();
+                .collect::<Result<_>>()?;
             Ok(Some(TunnelConfig::Ssh { ssh_jumps }))
         }
         TunnelKind::Socks5 => {
@@ -324,5 +359,62 @@ mod tests {
         ]);
         let err = cli_to_tunnel_config(&cli).unwrap_err();
         assert!(matches!(err, Error::Config(ref m) if m.contains("--ssh-*")));
+    }
+
+    #[test]
+    fn ssh_hop_single_builds_jump_with_per_hop_creds() {
+        let cli = parse(&[
+            "--tunnel=ssh",
+            "--ssh-hop",
+            r#"{"host":"gw","user":"admin","password":"not-a-real-password","port":2222}"#,
+        ]);
+        let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
+        let TunnelConfig::Ssh { ssh_jumps } = cfg else {
+            panic!("expected Ssh")
+        };
+        assert_eq!(ssh_jumps.len(), 1);
+        assert_eq!(ssh_jumps[0].host, "gw");
+        assert_eq!(ssh_jumps[0].user, "admin");
+        assert_eq!(ssh_jumps[0].password.as_deref(), Some("not-a-real-password"));
+        assert_eq!(ssh_jumps[0].port, 2222);
+    }
+
+    #[test]
+    fn ssh_hop_repeated_accumulates_two_hops() {
+        let cli = parse(&[
+            "--tunnel=ssh",
+            "--ssh-hop",
+            r#"{"host":"gw","user":"admin","password":"pw1"}"#,
+            "--ssh-hop",
+            r#"{"host":"54","user":"xxjs","password":"pw2"}"#,
+        ]);
+        let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
+        let TunnelConfig::Ssh { ssh_jumps } = cfg else {
+            panic!("expected Ssh")
+        };
+        assert_eq!(ssh_jumps.len(), 2);
+        assert_eq!(ssh_jumps[0].user, "admin");
+        assert_eq!(ssh_jumps[1].user, "xxjs");
+    }
+
+    #[test]
+    fn ssh_jump_and_ssh_hop_together_errors() {
+        let cli = parse(&[
+            "--tunnel=ssh",
+            "--ssh-jump=gw",
+            "--ssh-hop",
+            r#"{"host":"54","user":"xxjs"}"#,
+        ]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("mutually exclusive")));
+    }
+
+    #[test]
+    fn ssh_hop_invalid_json_errors() {
+        let cli = parse(&["--tunnel=ssh", "--ssh-hop", "not-json{"]);
+        let err = cli_to_tunnel_config(&cli).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref m) if m.contains("--ssh-hop") && m.contains("parse failed"))
+        );
     }
 }

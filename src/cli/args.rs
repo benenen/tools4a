@@ -74,6 +74,21 @@ pub struct SshTunnelArgs {
     /// SSH jump port (used when --tunnel=ssh)
     #[arg(long, global = true, requires = "tunnel", help_heading = "Tunnel")]
     pub ssh_port: Option<u16>,
+
+    /// Per-hop SSH credentials as a JSON object (used when --tunnel=ssh).
+    /// Repeat once per hop in client→target order. Each value is a JSON
+    /// object with `host` (required) plus optional `user`/`password`/
+    /// `key_path`/`port` overrides; unspecified fields fall back to the
+    /// top-level `--ssh-user`/`--ssh-password`/`--ssh-key-path`/`--ssh-port`.
+    /// Mutually exclusive with `--ssh-jump`.
+    #[arg(
+        long,
+        global = true,
+        requires = "tunnel",
+        help_heading = "Tunnel",
+        action = clap::ArgAction::Append
+    )]
+    pub ssh_hop: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -797,5 +812,53 @@ mod tests {
         assert_eq!(cli.socks5.socks5_port, Some(2235));
         assert_eq!(cli.socks5.socks5_user.as_deref(), Some("alice"));
         assert_eq!(cli.socks5.socks5_password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn test_ssh_hop_single_parses() {
+        let cli = Cli::try_parse_from([
+            "tools4a",
+            "--tunnel=ssh",
+            "--ssh-hop",
+            r#"{"host":"gw","user":"admin","password":"not-a-real-password"}"#,
+            "mysql",
+            "SELECT 1",
+        ])
+        .unwrap();
+        assert_eq!(cli.ssh.ssh_hop.len(), 1);
+        assert!(cli.ssh.ssh_hop[0].contains("not-a-real-password"));
+    }
+
+    #[test]
+    fn test_ssh_hop_repeated_accumulates() {
+        let cli = Cli::try_parse_from([
+            "tools4a",
+            "--tunnel=ssh",
+            "--ssh-hop",
+            r#"{"host":"gw","user":"admin","password":"pw1"}"#,
+            "--ssh-hop",
+            r#"{"host":"54","user":"xxjs","password":"pw2"}"#,
+            "mysql",
+            "SELECT 1",
+        ])
+        .unwrap();
+        assert_eq!(cli.ssh.ssh_hop.len(), 2);
+        assert!(cli.ssh.ssh_hop[0].contains("admin"));
+        assert!(cli.ssh.ssh_hop[1].contains("xxjs"));
+    }
+
+    #[test]
+    fn test_ssh_hop_without_tunnel_errors() {
+        let result = Cli::try_parse_from([
+            "tools4a",
+            "--ssh-hop",
+            r#"{"host":"h"}"#,
+            "mysql",
+            "SELECT 1",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected clap to reject --ssh-hop without --tunnel"
+        );
     }
 }
