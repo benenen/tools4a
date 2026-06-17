@@ -49,6 +49,19 @@ pub struct Cli {
     #[command(flatten)]
     pub socks5: Socks5TunnelArgs,
 
+    /// Ordered transport hop (repeatable), local→target. URL form:
+    ///   socks5://[user[:pass]@]host[:port]
+    ///   ssh://user[:pass]@host[:port][?key=/abs/path]
+    /// Mutually exclusive with --tunnel/--ssh-*/--socks5-*.
+    #[arg(
+        long = "hop",
+        global = true,
+        value_name = "URL",
+        help_heading = "Tunnel",
+        conflicts_with_all = ["tunnel", "ssh_jump", "ssh_user", "socks5_host"]
+    )]
+    pub hop: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -122,10 +135,13 @@ pub enum TunnelKind {
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TunnelServeType {
     /// Single host:port forward, like `ssh -L LPORT:HOST:PORT JUMP`.
+    #[value(alias = "tcp")]
     SshTcp,
     /// Local TCP → remote unix socket, like `ssh -L LPORT:/sock JUMP`.
+    #[value(alias = "streamlocal")]
     SshStreamlocal,
     /// Dynamic SOCKS5 proxy, like `ssh -D LPORT JUMP`.
+    #[value(alias = "socks")]
     SshSocks,
 }
 
@@ -448,15 +464,16 @@ pub enum Commands {
         listen: std::net::SocketAddr,
 
         /// SSH jump host(s). Single host or comma-separated chain.
+        /// Optional when --hop is used instead.
         #[arg(
             long = "ssh-jump",
             value_name = "HOST[,HOST...]",
             help_heading = "TunnelServe"
         )]
-        ssh_jump: String,
+        ssh_jump: Option<String>,
 
         #[arg(long = "ssh-user", help_heading = "TunnelServe")]
-        ssh_user: String,
+        ssh_user: Option<String>,
 
         #[arg(long = "ssh-password", help_heading = "TunnelServe")]
         ssh_password: Option<String>,
@@ -466,6 +483,26 @@ pub enum Commands {
 
         #[arg(long = "ssh-port", default_value_t = 22, help_heading = "TunnelServe")]
         ssh_port: u16,
+
+        /// Optional external SOCKS5 underlay in front of the SSH chain
+        /// (reaches the first jump host through this proxy).
+        #[arg(long = "socks5-host", help_heading = "TunnelServe")]
+        socks5_host: Option<String>,
+        /// SOCKS5 proxy port (default 1080).
+        #[arg(long = "socks5-port", help_heading = "TunnelServe")]
+        socks5_port: Option<u16>,
+        /// SOCKS5 username (RFC 1929 — requires --socks5-password).
+        #[arg(long = "socks5-user", help_heading = "TunnelServe")]
+        socks5_user: Option<String>,
+        /// SOCKS5 password (RFC 1929 — requires --socks5-user).
+        #[arg(long = "socks5-password", help_heading = "TunnelServe")]
+        socks5_password: Option<String>,
+
+        /// Ordered transport hop (repeatable), local→target. Same URL
+        /// form as the global --hop. Mutually exclusive with --ssh-*/
+        /// --socks5-*.
+        #[arg(long = "hop", value_name = "URL", help_heading = "TunnelServe")]
+        hop: Vec<String>,
 
         /// For --type=ssh-tcp: target host the bastion connects to.
         #[arg(long = "target-host", help_heading = "TunnelServe")]

@@ -7,7 +7,7 @@
 use crate::cli::{Cli, TunnelKind};
 use tools4a_core::config::{Config, ConfigLoader, ConfigMerger, Profile, ServiceType, TomlConfig};
 use tools4a_core::{
-    Error, ExecutionResult, JumpHop, Result, TunnelConfig,
+    Error, ExecutionResult, JumpHop, Result, TunnelConfig, TunnelLayer,
     mcp::{SshJumpHopInput, merge_hop},
 };
 
@@ -123,10 +123,106 @@ pub(super) fn print_warnings(result: &ExecutionResult) {
     }
 }
 
-/// Convert top-level CLI `--tunnel` + `--ssh-*` + `--socks5-*` flags into a
-/// `TunnelConfig`. Cross-validates that flags from the wrong family aren't
-/// mixed with the chosen `--tunnel` kind.
+/// Percent-decode RFC 3986 userinfo / query values.
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse one `--hop` URL into a `TunnelLayer`. URL forms:
+///   socks5://[user[:pass]@]host[:port]
+///   ssh://user[:pass]@host[:port][?key=/abs/path]
+pub(crate) fn parse_hop_url(raw: &str) -> Result<TunnelLayer> {
+    let (scheme, rest) = raw
+        .split_once("://")
+        .ok_or_else(|| Error::Config(format!("--hop '{raw}': expected scheme://...")))?;
+    // split optional ?query
+    let (authority, query) = match rest.split_once('?') {
+        Some((a, q)) => (a, Some(q)),
+        None => (rest, None),
+    };
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, authority),
+    };
+    let (host, port_opt) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (
+            h.to_string(),
+            Some(
+                p.parse::<u16>()
+                    .map_err(|_| Error::Config(format!("--hop '{raw}': bad port")))?,
+            ),
+        ),
+        None => (hostport.to_string(), None),
+    };
+    if host.is_empty() {
+        return Err(Error::Config(format!("--hop '{raw}': empty host")));
+    }
+    let (user, password) = match userinfo {
+        None => (None, None),
+        Some(ui) => match ui.split_once(':') {
+            Some((u, p)) => (Some(pct_decode(u)), Some(pct_decode(p))),
+            None => (Some(pct_decode(ui)), None),
+        },
+    };
+    match scheme {
+        "socks5" => Ok(TunnelLayer::Socks5 {
+            host,
+            port: port_opt.unwrap_or(1080),
+            user,
+            password,
+        }),
+        "ssh" => {
+            let user =
+                user.ok_or_else(|| Error::Config(format!("--hop '{raw}': ssh needs a user")))?;
+            let key_path = query.and_then(|q| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("key="))
+                    .map(pct_decode)
+            });
+            Ok(TunnelLayer::SshHop(JumpHop {
+                host,
+                user,
+                password,
+                key_path,
+                port: port_opt.unwrap_or(22),
+            }))
+        }
+        other => Err(Error::Config(format!(
+            "--hop '{raw}': unknown scheme '{other}'"
+        ))),
+    }
+}
+
+/// Convert top-level CLI `--hop` (preferred) or `--tunnel` + `--ssh-*` +
+/// `--socks5-*` flags into a `TunnelConfig`. `--hop` lowers directly to an
+/// ordered layer stack; the legacy flags lower to the same stack, with
+/// `--socks5-*` becoming a SOCKS5 underlay in front of the SSH jump chain.
 pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
+    // --- Ordered --hop form (preferred) ---------------------------------
+    if !cli.hop.is_empty() {
+        let layers = cli
+            .hop
+            .iter()
+            .map(|raw| parse_hop_url(raw))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(Some(TunnelConfig::layered(layers)));
+    }
+
     let Some(kind) = cli.tunnel else {
         return Ok(None);
     };
@@ -154,14 +250,12 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
                     "SOCKS5 options (--socks5-*) are only valid with --tunnel=socks5".to_string(),
                 ));
             }
-            Ok(Some(TunnelConfig::Direct))
+            Ok(Some(TunnelConfig::direct()))
         }
         TunnelKind::Ssh => {
-            if stray_socks5 {
-                return Err(Error::Config(
-                    "SOCKS5 options (--socks5-*) are only valid with --tunnel=socks5".to_string(),
-                ));
-            }
+            // `--socks5-*` with `--tunnel=ssh` is no longer an error: it
+            // lowers to a SOCKS5 underlay in front of the SSH jump chain.
+            let socks5_prefix = socks5_underlay_layer(socks5)?;
             let default_port = ssh.ssh_port.unwrap_or(22);
             let hop_inputs: Vec<SshJumpHopInput> =
                 match (ssh.ssh_jump.as_deref(), ssh.ssh_hop.is_empty()) {
@@ -218,7 +312,10 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
                     )
                 })
                 .collect::<Result<_>>()?;
-            Ok(Some(TunnelConfig::Ssh { ssh_jumps }))
+            let mut layers = Vec::with_capacity(ssh_jumps.len() + 1);
+            layers.extend(socks5_prefix);
+            layers.extend(ssh_jumps.into_iter().map(TunnelLayer::SshHop));
+            Ok(Some(TunnelConfig::layered(layers)))
         }
         TunnelKind::Socks5 => {
             if stray_ssh {
@@ -237,14 +334,45 @@ pub(super) fn cli_to_tunnel_config(cli: &Cli) -> Result<Option<TunnelConfig>> {
                     "--socks5-user and --socks5-password must be set together".to_string(),
                 ));
             }
-            Ok(Some(TunnelConfig::Socks5 {
-                socks5_host: host,
-                socks5_port: socks5.socks5_port.unwrap_or(1080),
-                socks5_user: socks5.socks5_user.clone(),
-                socks5_password: socks5.socks5_password.clone(),
-            }))
+            Ok(Some(TunnelConfig::socks5(
+                host,
+                socks5.socks5_port.unwrap_or(1080),
+                socks5.socks5_user.clone(),
+                socks5.socks5_password.clone(),
+            )))
         }
     }
+}
+
+/// Lower `--socks5-*` flags (under `--tunnel=ssh`) into an optional SOCKS5
+/// underlay layer. `--socks5-host` is required for any underlay; stray
+/// `--socks5-port/-user/-password` without a host is an error.
+fn socks5_underlay_layer(socks5: &crate::cli::Socks5TunnelArgs) -> Result<Option<TunnelLayer>> {
+    let Some(host) = socks5.socks5_host.clone() else {
+        if socks5.socks5_port.is_some()
+            || socks5.socks5_user.is_some()
+            || socks5.socks5_password.is_some()
+        {
+            return Err(Error::Config(
+                "--socks5-host is required to add a socks5 underlay".to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    if host.is_empty() {
+        return Err(Error::Config("--socks5-host must not be empty".to_string()));
+    }
+    if socks5.socks5_user.is_some() != socks5.socks5_password.is_some() {
+        return Err(Error::Config(
+            "--socks5-user and --socks5-password must be set together".to_string(),
+        ));
+    }
+    Ok(Some(TunnelLayer::Socks5 {
+        host,
+        port: socks5.socks5_port.unwrap_or(1080),
+        user: socks5.socks5_user.clone(),
+        password: socks5.socks5_password.clone(),
+    }))
 }
 
 fn profile_to_config(profile: &Profile) -> Config {
@@ -277,17 +405,19 @@ mod tests {
     #[test]
     fn socks5_minimal_builds_socks5_variant() {
         let cli = parse(&["--tunnel=socks5", "--socks5-host=192.0.2.10"]);
-        match cli_to_tunnel_config(&cli).unwrap() {
-            Some(TunnelConfig::Socks5 {
-                socks5_host,
-                socks5_port,
-                socks5_user,
-                socks5_password,
-            }) => {
-                assert_eq!(socks5_host, "192.0.2.10");
-                assert_eq!(socks5_port, 1080);
-                assert!(socks5_user.is_none());
-                assert!(socks5_password.is_none());
+        let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
+        assert_eq!(cfg.layers.len(), 1);
+        match &cfg.layers[0] {
+            TunnelLayer::Socks5 {
+                host,
+                port,
+                user,
+                password,
+            } => {
+                assert_eq!(host, "192.0.2.10");
+                assert_eq!(*port, 1080);
+                assert!(user.is_none());
+                assert!(password.is_none());
             }
             other => panic!("expected Socks5, got {other:?}"),
         }
@@ -302,16 +432,17 @@ mod tests {
             "--socks5-user=alice",
             "--socks5-password=s3cret",
         ]);
-        match cli_to_tunnel_config(&cli).unwrap() {
-            Some(TunnelConfig::Socks5 {
-                socks5_port,
-                socks5_user,
-                socks5_password,
+        let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
+        match &cfg.layers[0] {
+            TunnelLayer::Socks5 {
+                port,
+                user,
+                password,
                 ..
-            }) => {
-                assert_eq!(socks5_port, 2235);
-                assert_eq!(socks5_user.as_deref(), Some("alice"));
-                assert_eq!(socks5_password.as_deref(), Some("s3cret"));
+            } => {
+                assert_eq!(*port, 2235);
+                assert_eq!(user.as_deref(), Some("alice"));
+                assert_eq!(password.as_deref(), Some("s3cret"));
             }
             other => panic!("expected Socks5, got {other:?}"),
         }
@@ -339,15 +470,74 @@ mod tests {
     }
 
     #[test]
-    fn ssh_rejects_stray_socks5() {
+    fn ssh_plus_socks5_combines_into_underlay_then_jump() {
+        // tunnel=ssh + --socks5-host now LOWERS to [Socks5, SshHop...].
         let cli = parse(&[
             "--tunnel=ssh",
             "--ssh-jump=bastion.com",
             "--ssh-user=u",
-            "--socks5-host=p",
+            "--socks5-host=192.0.2.10",
+            "--socks5-port=2235",
+        ]);
+        let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
+        assert_eq!(cfg.layers.len(), 2);
+        assert!(cfg.ssh_jumps().is_none());
+        assert!(cfg.last_layer_is_ssh());
+        match &cfg.layers[0] {
+            TunnelLayer::Socks5 { host, port, .. } => {
+                assert_eq!(host, "192.0.2.10");
+                assert_eq!(*port, 2235);
+            }
+            other => panic!("expected socks5 underlay, got {other:?}"),
+        }
+        match &cfg.layers[1] {
+            TunnelLayer::SshHop(h) => assert_eq!(h.host, "bastion.com"),
+            other => panic!("expected ssh hop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_plus_socks5_port_without_host_errors() {
+        // The reviewer-flagged untested branch: socks5 underlay fields
+        // (port/user) without --socks5-host is nonsensical.
+        let cli = parse(&[
+            "--tunnel=ssh",
+            "--ssh-jump=bastion.com",
+            "--ssh-user=u",
+            "--socks5-port=2235",
         ]);
         let err = cli_to_tunnel_config(&cli).unwrap_err();
-        assert!(matches!(err, Error::Config(ref m) if m.contains("--socks5-*")));
+        assert!(matches!(err, Error::Config(ref m) if m.contains("--socks5-host")));
+    }
+
+    #[test]
+    fn hop_socks5_then_ssh_builds_layered() {
+        let cli = parse(&[
+            "--hop",
+            "socks5://192.0.2.10:2235",
+            "--hop",
+            "ssh://admin:not-a-real-password@192.0.2.20:22",
+        ]);
+        let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
+        assert_eq!(cfg.layers.len(), 2);
+        assert!(cfg.ssh_jumps().is_none());
+        assert!(cfg.last_layer_is_ssh());
+        match &cfg.layers[0] {
+            TunnelLayer::Socks5 { host, port, .. } => {
+                assert_eq!(host, "192.0.2.10");
+                assert_eq!(*port, 2235);
+            }
+            other => panic!("expected socks5, got {other:?}"),
+        }
+        match &cfg.layers[1] {
+            TunnelLayer::SshHop(h) => {
+                assert_eq!(h.host, "127.0.0.1");
+                assert_eq!(h.port, 3203);
+                assert_eq!(h.user, "admin");
+                assert_eq!(h.password.as_deref(), Some("not-a-real-password"));
+            }
+            other => panic!("expected ssh hop, got {other:?}"),
+        }
     }
 
     #[test]
@@ -369,9 +559,7 @@ mod tests {
             r#"{"host":"gw","user":"admin","password":"not-a-real-password","port":2222}"#,
         ]);
         let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
-        let TunnelConfig::Ssh { ssh_jumps } = cfg else {
-            panic!("expected Ssh")
-        };
+        let ssh_jumps = cfg.ssh_jumps().expect("all-ssh");
         assert_eq!(ssh_jumps.len(), 1);
         assert_eq!(ssh_jumps[0].host, "gw");
         assert_eq!(ssh_jumps[0].user, "admin");
@@ -389,9 +577,7 @@ mod tests {
             r#"{"host":"54","user":"xxjs","password":"pw2"}"#,
         ]);
         let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
-        let TunnelConfig::Ssh { ssh_jumps } = cfg else {
-            panic!("expected Ssh")
-        };
+        let ssh_jumps = cfg.ssh_jumps().expect("all-ssh");
         assert_eq!(ssh_jumps.len(), 2);
         assert_eq!(ssh_jumps[0].user, "admin");
         assert_eq!(ssh_jumps[1].user, "xxjs");
@@ -416,5 +602,87 @@ mod tests {
         assert!(
             matches!(err, Error::Config(ref m) if m.contains("--ssh-hop") && m.contains("parse failed"))
         );
+    }
+}
+
+#[cfg(test)]
+mod hop_tests {
+    use super::*;
+    use tools4a_core::TunnelLayer;
+
+    #[test]
+    fn parse_socks5_hop_no_auth() {
+        let l = parse_hop_url("socks5://192.0.2.10:2235").unwrap();
+        match l {
+            TunnelLayer::Socks5 {
+                host,
+                port,
+                user,
+                password,
+            } => {
+                assert_eq!(host, "192.0.2.10");
+                assert_eq!(port, 2235);
+                assert!(user.is_none() && password.is_none());
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_socks5_hop_default_port() {
+        let l = parse_hop_url("socks5://proxy.internal").unwrap();
+        match l {
+            TunnelLayer::Socks5 { host, port, .. } => {
+                assert_eq!(host, "proxy.internal");
+                assert_eq!(port, 1080);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_ssh_hop_with_percent_encoded_password() {
+        // not-a-real-password -> not-a-real-password
+        let l = parse_hop_url("ssh://admin:not-a-real-password@192.0.2.20:22").unwrap();
+        match l {
+            TunnelLayer::SshHop(h) => {
+                assert_eq!(h.host, "127.0.0.1");
+                assert_eq!(h.port, 3203);
+                assert_eq!(h.user, "admin");
+                assert_eq!(h.password.as_deref(), Some("not-a-real-password"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_ssh_hop_key_via_query() {
+        let l = parse_hop_url("ssh://ubuntu@10.0.0.5?key=/home/me/.ssh/id_ed25519").unwrap();
+        match l {
+            TunnelLayer::SshHop(h) => {
+                assert_eq!(h.port, 22);
+                assert_eq!(h.user, "ubuntu");
+                assert_eq!(h.key_path.as_deref(), Some("/home/me/.ssh/id_ed25519"));
+                assert!(h.password.is_none());
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_hop_rejects_missing_scheme() {
+        assert!(parse_hop_url("192.0.2.10:2235").is_err());
+    }
+
+    #[test]
+    fn parse_hop_rejects_unknown_scheme() {
+        let err = parse_hop_url("http://x:80").unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("unknown scheme")));
+    }
+
+    #[test]
+    fn parse_ssh_hop_without_user_errors() {
+        let err = parse_hop_url("ssh://10.0.0.5:22").unwrap_err();
+        assert!(matches!(err, Error::Config(ref m) if m.contains("ssh needs a user")));
     }
 }
