@@ -28,10 +28,7 @@ pub use timeout::{
     DEFAULT_MAX_TIMEOUT_SECS, EffectiveTimeout, apply_with_timeout, resolve_effective_timeout,
 };
 pub use toon::{compressed_to_toon, to_toon};
-pub use tunnel::{
-    Connector, DirectTunnel, ForwardTarget, LayeredTunnel, Socks5ClientTunnel, SocksTunnel,
-    SshTunnel, StreamLocalTunnel, build_connector, build_tunnel,
-};
+pub use tunnel::{Connector, ForwardTarget, LayeredTunnel, Stream, build_connector, build_tunnel};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

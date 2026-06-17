@@ -9,11 +9,13 @@
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
-use super::chain::build_connector;
+use super::chain::{build_connector, build_streamlocal_connector};
 use super::socks::connector::Connector;
 use super::socks::server::Socks5Server;
-use crate::{Error, Result, Tunnel, TunnelConfig, TunnelEndpoint};
+use crate::session::AcceptAnyHostKey;
+use crate::{Error, Result, Tunnel, TunnelConfig, TunnelEndpoint, TunnelLayer};
 
 /// What the local listener forwards each accepted connection to.
 pub enum ForwardTarget {
@@ -28,15 +30,18 @@ pub enum ForwardTarget {
 }
 
 /// Cheap `Clone`able description of a `ForwardTarget` so each spawned
-/// per-connection task can own its own copy.
+/// per-connection task can own its own copy. `StreamLocal` is intentionally
+/// absent: it never rides the generic `serve_conn` path (it needs a concrete
+/// SSH handle, so `establish` runs a dedicated accept loop for it).
 #[derive(Clone)]
 enum TargetSpec {
     Tcp { host: String, port: u16 },
     Socks5Server,
-    StreamLocal { path: String },
 }
 
 impl ForwardTarget {
+    /// Describe the non-streamlocal targets. Only called for `Tcp` /
+    /// `Socks5Server` (streamlocal is dispatched separately in `establish`).
     fn describe(&self) -> TargetSpec {
         match self {
             ForwardTarget::Tcp { host, port } => TargetSpec::Tcp {
@@ -44,12 +49,15 @@ impl ForwardTarget {
                 port: *port,
             },
             ForwardTarget::Socks5Server => TargetSpec::Socks5Server,
-            ForwardTarget::StreamLocal { path } => TargetSpec::StreamLocal { path: path.clone() },
+            ForwardTarget::StreamLocal { .. } => {
+                unreachable!("streamlocal targets are dispatched before describe()")
+            }
         }
     }
 }
 
 pub struct LayeredTunnel {
+    layers: Vec<TunnelLayer>,
     connector: Arc<dyn Connector>,
     target: ForwardTarget,
     listen_addr: Option<SocketAddr>,
@@ -65,6 +73,7 @@ struct LayeredState {
 impl LayeredTunnel {
     pub fn new(cfg: &TunnelConfig, target: ForwardTarget) -> Self {
         Self {
+            layers: cfg.layers.clone(),
             connector: build_connector(&cfg.layers),
             target,
             listen_addr: None,
@@ -89,15 +98,29 @@ impl Tunnel for LayeredTunnel {
                 "LayeredTunnel::establish called twice".into(),
             ));
         }
-        if matches!(self.target, ForwardTarget::StreamLocal { .. }) && !self.last_layer_is_ssh {
-            return Err(Error::Config(
-                "streamlocal target requires the innermost layer to be an SSH hop".into(),
-            ));
-        }
-
-        // Fail fast: establish SSH sessions / validate the chain now so bad
-        // credentials surface at establish() time, not on the first byte.
-        self.connector.prewarm().await?;
+        // Streamlocal needs a real SSH session at the innermost hop (the
+        // TCP-shaped `Connector` API can't open a unix-socket channel), so
+        // it folds a concrete `SshHopConnector` and runs its own forwarder.
+        // The other two targets ride the generic `dyn Connector` chain.
+        let streamlocal = match &self.target {
+            ForwardTarget::StreamLocal { path } => {
+                if !self.last_layer_is_ssh {
+                    return Err(Error::Config(
+                        "streamlocal target requires the innermost layer to be an SSH hop".into(),
+                    ));
+                }
+                let conn = build_streamlocal_connector(&self.layers)?;
+                conn.prewarm().await?;
+                let handle = conn.handle().await?;
+                Some((conn, handle, path.clone()))
+            }
+            _ => {
+                // Fail fast: establish SSH sessions / validate the chain now
+                // so bad credentials surface at establish() time.
+                self.connector.prewarm().await?;
+                None
+            }
+        };
 
         let bind = self
             .listen_addr
@@ -109,36 +132,65 @@ impl Tunnel for LayeredTunnel {
         let (host, port) = (local.ip().to_string(), local.port());
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-        let connector = Arc::clone(&self.connector);
-        let target = self.target.describe();
 
-        let listener_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
-                            break;
+        let listener_task = if let Some((conn, handle, path)) = streamlocal {
+            // Keep the concrete connector alive for the loop's lifetime so
+            // its cached SSH session (and the channels on it) survive.
+            tokio::spawn(async move {
+                let _keepalive = conn;
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() { break; }
+                        }
+                        accepted = listener.accept() => {
+                            let (inbound, _) = match accepted {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    eprintln!("layered tunnel: accept failed: {e}");
+                                    break;
+                                }
+                            };
+                            let handle = Arc::clone(&handle);
+                            let path = path.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = forward_streamlocal(handle, path, inbound).await {
+                                    eprintln!("layered tunnel: streamlocal forward failed: {e}");
+                                }
+                            });
                         }
                     }
-                    accepted = listener.accept() => {
-                        let (inbound, _) = match accepted {
-                            Ok(p) => p,
-                            Err(e) => {
-                                eprintln!("layered tunnel: accept failed: {e}");
-                                break;
-                            }
-                        };
-                        let connector = Arc::clone(&connector);
-                        let target = target.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = serve_conn(connector, target, inbound).await {
-                                eprintln!("layered tunnel: forward failed: {e}");
-                            }
-                        });
+                }
+            })
+        } else {
+            let connector = Arc::clone(&self.connector);
+            let target = self.target.describe();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() { break; }
+                        }
+                        accepted = listener.accept() => {
+                            let (inbound, _) = match accepted {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    eprintln!("layered tunnel: accept failed: {e}");
+                                    break;
+                                }
+                            };
+                            let connector = Arc::clone(&connector);
+                            let target = target.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = serve_conn(connector, target, inbound).await {
+                                    eprintln!("layered tunnel: forward failed: {e}");
+                                }
+                            });
+                        }
                     }
                 }
-            }
-        });
+            })
+        };
 
         self.state = Some(LayeredState {
             shutdown: shutdown_tx,
@@ -178,16 +230,32 @@ async fn serve_conn(
             // server drives its outbound CONNECTs through.
             Socks5Server::serve_one(inbound, connector).await?;
         }
-        TargetSpec::StreamLocal { path } => {
-            // Streamlocal forwarding (remote unix socket via the innermost
-            // SSH hop) is not yet wired into the layer engine. The next
-            // group routes it through the folded connector / a dedicated
-            // streamlocal channel; until then, surface a clear error.
-            return Err(Error::Config(format!(
-                "streamlocal target ({path}) is not yet wired into LayeredTunnel"
-            )));
-        }
     }
+    Ok(())
+}
+
+/// Bridge an inbound TCP conn ⟷ a fresh `direct-streamlocal` channel on the
+/// innermost SSH hop, to a remote unix-domain socket at `socket_path`.
+async fn forward_streamlocal(
+    session: Arc<Mutex<russh::client::Handle<AcceptAnyHostKey>>>,
+    socket_path: String,
+    mut inbound: tokio::net::TcpStream,
+) -> Result<()> {
+    let channel = session
+        .lock()
+        .await
+        .channel_open_direct_streamlocal(socket_path.clone())
+        .await
+        .map_err(|e| {
+            Error::Connection(format!(
+                "open direct-streamlocal to {socket_path} failed: {e}"
+            ))
+        })?;
+    // ChannelStream is not Unpin, so box-pin before copy_bidirectional.
+    let mut channel_stream = Box::pin(channel.into_stream());
+    tokio::io::copy_bidirectional(&mut inbound, &mut channel_stream)
+        .await
+        .map_err(Error::Io)?;
     Ok(())
 }
 

@@ -20,9 +20,8 @@ use crate::run::run as dispatch_action;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tools4a_core::{
-    Error, ExecutionResult, Result, Service, SshTunnel, StreamLocalTunnel, Tunnel, TunnelConfig,
-};
+use tools4a_core::tunnel::{ForwardTarget, LayeredTunnel};
+use tools4a_core::{Error, ExecutionResult, Result, Service, Tunnel, TunnelConfig};
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
@@ -85,52 +84,64 @@ async fn resolve_target(
     req: &DockerRequest,
     tunnel_config: Option<TunnelConfig>,
 ) -> Result<(ConnectTarget, Option<ActiveTunnel>)> {
-    match (tunnel_config, req.unix_socket.as_deref()) {
-        // Remote Unix socket via SSH.
-        (Some(TunnelConfig::Ssh { ssh_jumps }), Some(socket_path)) => {
-            let mut tunnel = StreamLocalTunnel::new(ssh_jumps, socket_path.to_string())?;
-            let ep = tunnel.establish().await?;
-            let addr = format!("{}:{}", ep.host, ep.port);
-            let boxed: Box<dyn Tunnel> = Box::new(tunnel);
-            Ok((ConnectTarget::Tcp(addr), Some(Arc::new(Mutex::new(boxed)))))
+    let cfg = tunnel_config.unwrap_or_else(TunnelConfig::direct);
+
+    // Direct (no tunnel): plain local socket / local-or-remote TCP.
+    if cfg.is_direct() {
+        if req.unix_socket.is_some() {
+            return Err(Error::Config(
+                "unix_socket only valid with an ssh tunnel (use docker_host=unix://path for the \
+                 local socket)"
+                    .to_string(),
+            ));
         }
+        return Ok((parse_docker_host(&req.docker_host)?, None));
+    }
+
+    // Any tunnel: the docker daemon is reached either over a remote unix
+    // socket (direct-streamlocal) or a remote TCP port (direct-tcpip), both
+    // of which ride an SSH session at the innermost hop. A SOCKS5 underlay
+    // in front of the SSH chain is fine (it only carries the gateway dial),
+    // but the stack MUST end in an SSH hop.
+    if !cfg.last_layer_is_ssh() {
+        return Err(Error::Config(
+            "docker requires the tunnel stack to end in an SSH hop (a socks5-only proxy can't \
+             reach the daemon socket; use ssh, optionally with a socks5:// underlay)"
+                .to_string(),
+        ));
+    }
+
+    let tunnel = match req.unix_socket.as_deref() {
+        // Remote Unix socket via SSH (optionally behind a socks5 underlay).
+        Some(socket_path) => LayeredTunnel::new(
+            &cfg,
+            ForwardTarget::StreamLocal {
+                path: socket_path.to_string(),
+            },
+        ),
         // Remote TCP via SSH.
-        (Some(TunnelConfig::Ssh { ssh_jumps }), None) => {
+        None => {
             let target = parse_docker_host(&req.docker_host)?;
             let (host, port) = match target {
                 ConnectTarget::Tcp(addr) => parse_host_port(&addr)?,
                 ConnectTarget::UnixSocket(_) => {
                     return Err(Error::Config(
-                        "tunnel=ssh with a unix:// docker_host requires unix_socket=<remote_path> \
-                         (the remote daemon's socket); did you mean to set unix_socket?"
+                        "an ssh tunnel with a unix:// docker_host requires \
+                         unix_socket=<remote_path> (the remote daemon's socket); did you mean to \
+                         set unix_socket?"
                             .to_string(),
                     ));
                 }
             };
-            let mut tunnel = SshTunnel::new(ssh_jumps, host, port)?;
-            let ep = tunnel.establish().await?;
-            let addr = format!("{}:{}", ep.host, ep.port);
-            let boxed: Box<dyn Tunnel> = Box::new(tunnel);
-            Ok((ConnectTarget::Tcp(addr), Some(Arc::new(Mutex::new(boxed)))))
+            LayeredTunnel::new(&cfg, ForwardTarget::Tcp { host, port })
         }
-        // Direct, no tunnel.
-        (None | Some(TunnelConfig::Direct), None) => {
-            Ok((parse_docker_host(&req.docker_host)?, None))
-        }
-        // Caller asked for unix_socket but no SSH tunnel.
-        (None | Some(TunnelConfig::Direct), Some(_)) => Err(Error::Config(
-            "unix_socket only valid with tunnel=ssh (use docker_host=unix://path for local socket)"
-                .to_string(),
-        )),
-        // SOCKS5 tunnel not currently wired through docker — the remote
-        // Docker daemon is reached through SSH unix-socket forwarding,
-        // which has no SOCKS5 equivalent.
-        (Some(TunnelConfig::Socks5 { .. }), _) => Err(Error::Config(
-            "docker does not support --tunnel=socks5 (use --tunnel=ssh with the remote \
-             daemon's unix_socket, or expose the daemon over TCP and use --tunnel=direct)"
-                .to_string(),
-        )),
-    }
+    };
+
+    let mut tunnel = tunnel;
+    let ep = tunnel.establish().await?;
+    let addr = format!("{}:{}", ep.host, ep.port);
+    let boxed: Box<dyn Tunnel> = Box::new(tunnel);
+    Ok((ConnectTarget::Tcp(addr), Some(Arc::new(Mutex::new(boxed)))))
 }
 
 fn parse_host_port(addr: &str) -> Result<(String, u16)> {

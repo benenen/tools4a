@@ -1,4 +1,5 @@
-//! Integration test for `SshDirectOrchestrator` + `TunnelConfig::Socks5`.
+//! Integration test for `SshDirectOrchestrator` over a single SOCKS5 layer
+//! (`TunnelConfig::socks5(...)`).
 //!
 //! Spins up:
 //!   1. A fake "target SSH" TCP listener that signals via oneshot on
@@ -7,15 +8,15 @@
 //!      requiring a real SSH server.
 //!   2. A scripted SOCKS5 proxy (no-auth) that parses the CONNECT body
 //!      into `seen_target`, then bridges to the fake target listener.
-//!   3. `SshDirectOrchestrator::execute(req, Some(TunnelConfig::Socks5))`.
+//!   3. `SshDirectOrchestrator::execute(req, Some(socks5 tunnel))`.
 //!
 //! We assert:
 //!   - The target listener was reached (proves end-to-end routing).
 //!   - The proxy saw a CONNECT for `(req.host, req.port)` (proves the
-//!     CONNECT body was constructed from the request, not a hardcoded
-//!     constant).
+//!     CONNECT body was constructed from the request via the connector
+//!     chain, not a hardcoded constant).
 //!   - The returned error names `req.host` (proves the host-key label
-//!     was preserved through `connect_addr_override`).
+//!     was preserved through the connector-provided stream).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -139,12 +140,8 @@ async fn orchestrator_socks5_arm_reaches_target_via_proxy() {
             timeout_secs: None,
             max_timeout_secs: None,
         };
-        let tunnel_config = TunnelConfig::Socks5 {
-            socks5_host: proxy_addr.ip().to_string(),
-            socks5_port: proxy_addr.port(),
-            socks5_user: None,
-            socks5_password: None,
-        };
+        let tunnel_config =
+            TunnelConfig::socks5(proxy_addr.ip().to_string(), proxy_addr.port(), None, None);
 
         let result = SshDirectOrchestrator::execute(req, Some(tunnel_config)).await;
 

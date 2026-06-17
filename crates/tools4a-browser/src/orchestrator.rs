@@ -1,16 +1,17 @@
 //! BrowserOrchestrator — `Service` impl for the browser tool.
 //!
-//! Tunnel behavior:
-//!   - None / Direct: spawn agent-browser as-is.
-//!   - Ssh: build a SocksTunnel (server-side SOCKS5 over the SSH chain),
-//!     inject `--proxy socks5://<local-endpoint>` into the request, then
-//!     run; tear the tunnel down on exit.
-//!   - Socks5: skip the local hop entirely. agent-browser already speaks
-//!     SOCKS5 natively, so we just format `socks5://[user:pass@]host:port`
-//!     directly into the request. No tunnel object to manage.
+//! Tunnel behavior (over the Phase 21 ordered-layer model):
+//!   - Direct (empty stack): spawn agent-browser as-is.
+//!   - Pure SOCKS5 stack (`[Socks5]`, no SSH): skip the local hop entirely.
+//!     agent-browser speaks SOCKS5 natively, so we format
+//!     `socks5://[user:pass@]host:port` straight into `--proxy`.
+//!   - Any SSH-containing stack: stand up a `LayeredTunnel` serving a local
+//!     SOCKS5 server over the folded chain, inject
+//!     `--proxy socks5://127.0.0.1:<port>`, run, then tear it down.
 
 use async_trait::async_trait;
-use tools4a_core::{Error, ExecutionResult, Result, Service, SocksTunnel, Tunnel, TunnelConfig};
+use tools4a_core::tunnel::{ForwardTarget, LayeredTunnel};
+use tools4a_core::{Error, ExecutionResult, Result, Service, Tunnel, TunnelConfig, TunnelLayer};
 
 use crate::execute::execute;
 use crate::request::BrowserRequest;
@@ -66,58 +67,57 @@ impl Service for BrowserOrchestrator {
         mut req: Self::Request,
         tunnel: Option<TunnelConfig>,
     ) -> Result<ExecutionResult> {
-        match tunnel {
-            None | Some(TunnelConfig::Direct) => execute(req).await,
-            Some(TunnelConfig::Ssh { ssh_jumps }) => {
-                if req.proxy.is_some() {
-                    return Err(Error::Config(
-                        "tunnel=ssh and an explicit `proxy` field conflict: \
-                         tools4a injects `--proxy socks5://...` when ssh is set. \
-                         Pick one — drop `proxy` and let tools4a do it, or use \
-                         tunnel=direct + your own proxy."
-                            .into(),
-                    ));
-                }
+        let cfg = tunnel.unwrap_or_else(TunnelConfig::direct);
 
-                let mut t = SocksTunnel::new(ssh_jumps)?;
-                let endpoint = t.establish().await?;
-                req.proxy = Some(format!("socks5://{}:{}", endpoint.host, endpoint.port));
-
-                let result = execute(req).await;
-
-                // Tear down regardless of outcome. Errors here don't
-                // override the execute() result; the call already
-                // happened, so the user-facing outcome is whatever
-                // execute returned.
-                if let Err(e) = t.close().await {
-                    eprintln!("BrowserOrchestrator: SocksTunnel close: {e}");
-                }
-                result
-            }
-            Some(TunnelConfig::Socks5 {
-                socks5_host,
-                socks5_port,
-                socks5_user,
-                socks5_password,
-            }) => {
-                if req.proxy.is_some() {
-                    return Err(Error::Config(
-                        "tunnel=socks5 and an explicit `proxy` field conflict: \
-                         tools4a injects `--proxy socks5://...` when socks5 tunnel \
-                         is set. Pick one — drop `proxy` and let tools4a do it, or \
-                         use tunnel=direct + your own proxy."
-                            .into(),
-                    ));
-                }
-                req.proxy = Some(format_socks5_url(
-                    &socks5_host,
-                    socks5_port,
-                    socks5_user.as_deref(),
-                    socks5_password.as_deref(),
-                ));
-                execute(req).await
-            }
+        // Direct (no layers): run agent-browser as-is.
+        if cfg.is_direct() {
+            return execute(req).await;
         }
+
+        // Any tunnel injects `--proxy socks5://...`; an explicit user proxy
+        // conflicts with that.
+        if req.proxy.is_some() {
+            return Err(Error::Config(
+                "a tunnel and an explicit `proxy` field conflict: tools4a injects \
+                 `--proxy socks5://...` when a tunnel is set. Pick one — drop `proxy` \
+                 and let tools4a do it, or use tunnel=direct + your own proxy."
+                    .into(),
+            ));
+        }
+
+        // Pure SOCKS5 stack (single socks5 layer, no SSH): agent-browser
+        // speaks SOCKS5 natively, so short-circuit — no local relay.
+        if let [
+            TunnelLayer::Socks5 {
+                host,
+                port,
+                user,
+                password,
+            },
+        ] = cfg.layers.as_slice()
+        {
+            req.proxy = Some(format_socks5_url(
+                host,
+                *port,
+                user.as_deref(),
+                password.as_deref(),
+            ));
+            return execute(req).await;
+        }
+
+        // Any SSH-containing stack: stand up a local SOCKS5 server over the
+        // folded chain and point agent-browser at it.
+        let mut t = LayeredTunnel::new(&cfg, ForwardTarget::Socks5Server);
+        let endpoint = t.establish().await?;
+        req.proxy = Some(format!("socks5://127.0.0.1:{}", endpoint.port));
+
+        let result = execute(req).await;
+
+        // Tear down regardless of outcome; the call already happened.
+        if let Err(e) = t.close().await {
+            eprintln!("BrowserOrchestrator: LayeredTunnel close: {e}");
+        }
+        result
     }
 }
 
@@ -144,15 +144,13 @@ mod tests {
         r.proxy = Some("socks5://example.com:1080".into());
         let err = BrowserOrchestrator::execute(
             r,
-            Some(TunnelConfig::Ssh {
-                ssh_jumps: vec![JumpHop {
-                    host: "bastion.example.com".to_string(),
-                    user: "admin".to_string(),
-                    password: None,
-                    key_path: None,
-                    port: 22,
-                }],
-            }),
+            Some(TunnelConfig::ssh(vec![JumpHop {
+                host: "bastion.example.com".to_string(),
+                user: "admin".to_string(),
+                password: None,
+                key_path: None,
+                port: 22,
+            }])),
         )
         .await
         .unwrap_err();
@@ -183,12 +181,7 @@ mod tests {
         r.proxy = Some("socks5://example.com:1080".into());
         let err = BrowserOrchestrator::execute(
             r,
-            Some(TunnelConfig::Socks5 {
-                socks5_host: "p".into(),
-                socks5_port: 1080,
-                socks5_user: None,
-                socks5_password: None,
-            }),
+            Some(TunnelConfig::socks5("p".into(), 1080, None, None)),
         )
         .await
         .unwrap_err();

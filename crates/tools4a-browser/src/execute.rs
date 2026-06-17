@@ -1,7 +1,7 @@
 //! Top-level entry: run one agent-browser invocation and return the
-//! structured result. No tunnel handling here — Phase 1 only supports
-//! direct execution; the orchestrator validates `TunnelConfig::Ssh`
-//! is not set and surfaces a Phase 2 deferral message.
+//! structured result. No tunnel handling here — `BrowserOrchestrator`
+//! resolves the tunnel layer stack and injects `--proxy socks5://...`
+//! into the request before calling this.
 
 use tools4a_core::{ExecutionResult, Result};
 

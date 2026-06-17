@@ -1,69 +1,36 @@
-//! Top-level entry: build (optional) SSH jump chain, open final SSH
-//! session to the target with target credentials, exec the command,
+//! Top-level entry: open the final SSH session to the target over a
+//! pre-connected transport stream (the connector chain handles all jump /
+//! socks5 layers), authenticate with target credentials, exec the command,
 //! map the output to an ExecutionResult.
 
 use russh::client;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tools4a_core::tunnel::Stream;
 use tools4a_core::{Error, ExecutionResult, Result};
 
 use crate::exec::{SshExec, output_to_result};
 use crate::request::SshExecRequest;
-use tools4a_core::JumpHop;
-use tools4a_core::session::{AcceptAnyHostKey, authenticate, build_session_chain};
+use tools4a_core::session::{AcceptAnyHostKey, authenticate};
 
-/// Run a single shell command on the SSH target described by `req`,
-/// optionally going through `jumps`. Always tears down the chain via Drop
-/// before returning.
+/// Run a single shell command on the SSH target described by `req`, over the
+/// already-connected transport `stream`. The caller (orchestrator) builds the
+/// transport via the connector chain (`build_connector(&cfg.layers).connect(
+/// &req.host, req.port)`), which transparently folds in any SOCKS5 / SSH-jump
+/// layers; here we just run the final SSH session on top of it.
 ///
-/// `connect_addr_override` (used by the Phase 19-follow-up SOCKS5 path) redirects the
-/// final TCP dial — when `Some((host, port))` AND `jumps` is empty, russh
-/// connects to `(host, port)` instead of `(req.host, req.port)`. The
-/// host-key warning label still uses `req.host`, so users see the real
-/// target name (not `127.0.0.1`).
-pub async fn execute(
-    req: SshExecRequest,
-    jumps: Option<Vec<JumpHop>>,
-    connect_addr_override: Option<(String, u16)>,
-) -> Result<ExecutionResult> {
+/// The host-key warning label uses `req.host`, so users see the real target
+/// name even when the stream rode through a chain.
+pub async fn execute(req: SshExecRequest, stream: Pin<Box<dyn Stream>>) -> Result<ExecutionResult> {
     let cfg = std::sync::Arc::new(client::Config::default());
-
-    // Build the jump chain (if any). Returns the last jump's session.
-    let mut jump_sessions = match &jumps {
-        Some(hops) if !hops.is_empty() => build_session_chain(hops).await?,
-        _ => Vec::new(),
-    };
 
     let target_handler = AcceptAnyHostKey {
         label: req.host.clone(),
     };
-    let mut target_session = if let Some(last_jump) = jump_sessions.last() {
-        let channel = last_jump
-            .lock()
-            .await
-            .channel_open_direct_tcpip(req.host.clone(), req.port as u32, "127.0.0.1", 0u32)
-            .await
-            .map_err(|e| {
-                Error::Connection(format!(
-                    "open direct-tcpip to {}:{} via last jump failed: {e}",
-                    req.host, req.port
-                ))
-            })?;
-        let stream = Box::pin(channel.into_stream());
-        client::connect_stream(cfg, stream, target_handler)
-            .await
-            .map_err(|e| {
-                Error::Connection(format!("SSH connect to {} (chained) failed: {e}", req.host))
-            })?
-    } else {
-        let (dial_host, dial_port) = match &connect_addr_override {
-            Some((h, p)) => (h.as_str(), *p),
-            None => (req.host.as_str(), req.port),
-        };
-        client::connect(cfg, (dial_host, dial_port), target_handler)
-            .await
-            .map_err(|e| Error::Connection(format!("SSH connect to {} failed: {e}", req.host)))?
-    };
+    let mut target_session = client::connect_stream(cfg, stream, target_handler)
+        .await
+        .map_err(|e| Error::Connection(format!("SSH connect to {} failed: {e}", req.host)))?;
 
     // Authenticate with TARGET's creds (not the jump creds).
     authenticate(
@@ -79,10 +46,8 @@ pub async fn execute(
     // Exec the command.
     let result = SshExec::run(target_session.clone(), &req.command).await;
 
-    // Drop the target session and the jump chain (Drop closes the
-    // underlying channels/connections).
+    // Drop the target session (Drop closes the underlying channels).
     drop(target_session);
-    jump_sessions.clear();
 
     Ok(output_to_result(result?))
 }
@@ -94,12 +59,13 @@ mod tests {
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
+    use tools4a_core::tunnel::build_connector;
 
-    /// `connect_addr_override` must:
-    ///  1. Cause the TCP dial to land on the override address.
-    ///  2. Keep `req.host` in error messages (host-key label preserved).
+    /// Running the session over a stream produced by the connector chain
+    /// must keep `req.host` in error messages (host-key label preserved),
+    /// even when the underlying dial landed on a different address.
     #[tokio::test]
-    async fn connect_addr_override_redirects_dial_but_keeps_host_label() {
+    async fn session_over_connector_stream_keeps_host_label() {
         // Fake listener that signals on accept then closes the connection
         // with a non-SSH banner so russh's handshake fails fast.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -123,21 +89,23 @@ mod tests {
             max_timeout_secs: None,
         };
 
-        let result = execute(
-            req,
-            None,
-            Some((fake_addr.ip().to_string(), fake_addr.port())),
-        )
-        .await;
+        // A direct (empty-layer) connector dialing the fake listener stands
+        // in for "the connector reached the target on some address".
+        let connector = build_connector(&[]);
+        let stream = connector
+            .connect(&fake_addr.ip().to_string(), fake_addr.port())
+            .await
+            .expect("dial fake listener");
 
-        // (1) Dial reached the override listener.
+        let result = execute(req, stream).await;
+
+        // (1) Dial reached the listener.
         tokio::time::timeout(Duration::from_secs(2), rx)
             .await
-            .expect("override dial never reached the listener")
+            .expect("dial never reached the listener")
             .expect("listener task dropped tx without sending");
 
-        // (2) Error preserves the original host name and does NOT leak the
-        // override addr.
+        // (2) Error preserves the original host name (host-key label).
         let err = result.expect_err("non-SSH banner must fail the handshake");
         let msg = format!("{err}");
         assert!(

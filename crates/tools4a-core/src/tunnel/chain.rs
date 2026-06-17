@@ -105,6 +105,13 @@ impl SshHopConnector {
         }
     }
 
+    /// Establish (or reuse) the SSH session on this hop and hand back the
+    /// shared handle. Used by `StreamLocalTunnel`, which needs a real SSH
+    /// session at the innermost hop to open `direct-streamlocal` channels.
+    pub(crate) async fn handle(&self) -> Result<SshHandle> {
+        self.ensure_session().await
+    }
+
     async fn ensure_session(&self) -> Result<SshHandle> {
         let handle = self
             .session
@@ -163,23 +170,48 @@ impl Connector for SshHopConnector {
 pub fn build_connector(layers: &[TunnelLayer]) -> Arc<dyn Connector> {
     let mut acc: Arc<dyn Connector> = Arc::new(TcpConnector);
     for layer in layers {
-        acc = match layer {
-            TunnelLayer::Socks5 {
-                host,
-                port,
-                user,
-                password,
-            } => Arc::new(Socks5Connector {
-                inner: acc,
-                proxy_host: host.clone(),
-                proxy_port: *port,
-                user: user.clone(),
-                password: password.clone(),
-            }),
-            TunnelLayer::SshHop(hop) => Arc::new(SshHopConnector::new(acc, hop.clone())),
-        };
+        acc = fold_layer(acc, layer);
     }
     acc
+}
+
+fn fold_layer(acc: Arc<dyn Connector>, layer: &TunnelLayer) -> Arc<dyn Connector> {
+    match layer {
+        TunnelLayer::Socks5 {
+            host,
+            port,
+            user,
+            password,
+        } => Arc::new(Socks5Connector {
+            inner: acc,
+            proxy_host: host.clone(),
+            proxy_port: *port,
+            user: user.clone(),
+            password: password.clone(),
+        }),
+        TunnelLayer::SshHop(hop) => Arc::new(SshHopConnector::new(acc, hop.clone())),
+    }
+}
+
+/// Fold a layer list whose innermost (last) layer MUST be an SSH hop,
+/// returning the concrete `Arc<SshHopConnector>` for that final hop. The
+/// `StreamLocalTunnel` needs this concrete type so it can grab the SSH
+/// handle and open `direct-streamlocal` channels (which `Connector::connect`
+/// — a TCP-shaped API — can't express). Errors if `layers` is empty or
+/// doesn't end in an SSH hop.
+pub(crate) fn build_streamlocal_connector(layers: &[TunnelLayer]) -> Result<Arc<SshHopConnector>> {
+    let Some((last, init)) = layers.split_last() else {
+        return Err(Error::Config(
+            "streamlocal requires an SSH hop (empty layer stack)".into(),
+        ));
+    };
+    let TunnelLayer::SshHop(hop) = last else {
+        return Err(Error::Config(
+            "streamlocal requires the innermost layer to be an SSH hop".into(),
+        ));
+    };
+    let inner = build_connector(init);
+    Ok(Arc::new(SshHopConnector::new(inner, hop.clone())))
 }
 
 #[cfg(test)]
