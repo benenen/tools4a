@@ -26,7 +26,8 @@ pub use timeout::{
 };
 pub use toon::{compressed_to_toon, to_toon};
 pub use tunnel::{
-    DirectTunnel, Socks5ClientTunnel, SocksTunnel, SshTunnel, StreamLocalTunnel, build_tunnel,
+    Connector, DirectTunnel, Socks5ClientTunnel, SocksTunnel, SshTunnel, StreamLocalTunnel,
+    build_connector, build_tunnel,
 };
 
 use async_trait::async_trait;
@@ -237,8 +238,30 @@ fn default_ssh_port() -> u16 {
     22
 }
 
-fn default_socks5_port() -> u16 {
+pub(crate) fn default_socks5_port() -> u16 {
     1080
+}
+
+/// One composable layer in a tunnel stack, used by the Phase 21 layer engine.
+/// The list is ordered local→target: the first element is nearest the client,
+/// the last is nearest the target service. `build_connector` folds the slice
+/// into a nested `Connector` chain starting from a raw `TcpConnector`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TunnelLayer {
+    /// Route through an external SOCKS5 proxy.
+    Socks5 {
+        host: String,
+        #[serde(default = "default_socks5_port")]
+        port: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+    /// Establish an SSH session (credentials + port from `JumpHop`), then
+    /// route subsequent connections through direct-tcpip channels on that
+    /// session.
+    SshHop(JumpHop),
 }
 
 // -- Service trait ------------------------------------------------------

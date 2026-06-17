@@ -13,7 +13,9 @@ mod streamlocal;
 
 use crate::{Result, Tunnel, TunnelConfig};
 
+pub use chain::build_connector;
 pub use direct::DirectTunnel;
+pub use socks::connector::Connector;
 pub use socks_tunnel::SocksTunnel;
 pub use socks5_client_tunnel::Socks5ClientTunnel;
 pub use ssh::SshTunnel;

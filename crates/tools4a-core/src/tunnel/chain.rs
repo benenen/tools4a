@@ -1,18 +1,23 @@
-//! Connector chain engine: the base of every tunnel stack. Currently holds
-//! `TcpConnector` (a raw local TCP dial); later layers wrap an inner
-//! `Connector` to compose SOCKS5/SSH transports.
+//! Connector chain engine: the base of every tunnel stack. Holds
+//! `TcpConnector` (a raw local TCP dial), `Socks5Connector` (a SOCKS5
+//! relay layer), and `SshHopConnector` (an SSH session layer with a
+//! cached-once handle). `build_connector` folds a `TunnelLayer` slice
+//! into the appropriate nested `Connector` chain.
 
 use async_trait::async_trait;
+use russh::client;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpStream;
+use tokio::sync::{Mutex, OnceCell};
 
 use super::socks::client::handshake_and_connect;
 use super::socks::connector::{Connector, Stream};
-use crate::{Error, Result};
+use crate::session::{AcceptAnyHostKey, authenticate};
+use crate::{Error, JumpHop, Result, TunnelLayer};
 
 /// Base of every chain: a raw local TCP dial.
-#[allow(dead_code)] // constructed by Task 3's build_connector
 pub(crate) struct TcpConnector;
 
 #[async_trait]
@@ -26,13 +31,12 @@ impl Connector for TcpConnector {
 }
 
 /// A SOCKS5 layer: reach the proxy via `inner`, then SOCKS5 CONNECT to the next.
-#[allow(dead_code)] // constructed by Task 3's build_connector
 pub(crate) struct Socks5Connector {
-    pub inner: Arc<dyn Connector>,
-    pub proxy_host: String,
-    pub proxy_port: u16,
-    pub user: Option<String>,
-    pub password: Option<String>,
+    pub(crate) inner: Arc<dyn Connector>,
+    pub(crate) proxy_host: String,
+    pub(crate) proxy_port: u16,
+    pub(crate) user: Option<String>,
+    pub(crate) password: Option<String>,
 }
 
 #[async_trait]
@@ -78,6 +82,187 @@ mod tests {
         let mut buf = [0u8; 2];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hi");
+    }
+}
+
+type SshHandle = Arc<Mutex<client::Handle<AcceptAnyHostKey>>>;
+
+/// An SSH layer: reach the SSH server via `inner`, establish and
+/// authenticate ONCE (cached in `OnceCell`), then open one
+/// `direct-tcpip` channel per `connect` call.
+pub(crate) struct SshHopConnector {
+    pub(crate) inner: Arc<dyn Connector>,
+    pub(crate) hop: JumpHop,
+    session: OnceCell<SshHandle>,
+}
+
+impl SshHopConnector {
+    pub(crate) fn new(inner: Arc<dyn Connector>, hop: JumpHop) -> Self {
+        Self {
+            inner,
+            hop,
+            session: OnceCell::new(),
+        }
+    }
+
+    async fn ensure_session(&self) -> Result<SshHandle> {
+        let handle = self
+            .session
+            .get_or_try_init(|| async {
+                let cfg = Arc::new(client::Config::default());
+                let stream = self.inner.connect(&self.hop.host, self.hop.port).await?;
+                let handler = AcceptAnyHostKey {
+                    label: self.hop.host.clone(),
+                };
+                let mut session =
+                    client::connect_stream(cfg, stream, handler)
+                        .await
+                        .map_err(|e| {
+                            Error::Connection(format!(
+                                "SSH connect to {} failed: {e}",
+                                self.hop.host
+                            ))
+                        })?;
+                authenticate(
+                    &mut session,
+                    &self.hop.user,
+                    self.hop.password.as_deref(),
+                    self.hop.key_path.as_deref().map(Path::new),
+                )
+                .await?;
+                Ok::<_, Error>(Arc::new(Mutex::new(session)))
+            })
+            .await?;
+        Ok(handle.clone())
+    }
+}
+
+#[async_trait]
+impl Connector for SshHopConnector {
+    async fn connect(&self, host: &str, port: u16) -> Result<Pin<Box<dyn Stream>>> {
+        let handle = self.ensure_session().await?;
+        let channel = handle
+            .lock()
+            .await
+            .channel_open_direct_tcpip(host.to_string(), port as u32, "127.0.0.1", 0u32)
+            .await
+            .map_err(|e| Error::Connection(format!("direct-tcpip to {host}:{port}: {e}")))?;
+        Ok(Box::pin(channel.into_stream()))
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        self.inner.prewarm().await?;
+        self.ensure_session().await?;
+        Ok(())
+    }
+}
+
+/// Fold a layer list (local→target order) into the top `Connector`.
+/// The bottom of the stack is always a raw `TcpConnector`; each layer
+/// in `layers` wraps the accumulator in a new connector type.
+pub fn build_connector(layers: &[TunnelLayer]) -> Arc<dyn Connector> {
+    let mut acc: Arc<dyn Connector> = Arc::new(TcpConnector);
+    for layer in layers {
+        acc = match layer {
+            TunnelLayer::Socks5 {
+                host,
+                port,
+                user,
+                password,
+            } => Arc::new(Socks5Connector {
+                inner: acc,
+                proxy_host: host.clone(),
+                proxy_port: *port,
+                user: user.clone(),
+                password: password.clone(),
+            }),
+            TunnelLayer::SshHop(hop) => Arc::new(SshHopConnector::new(acc, hop.clone())),
+        };
+    }
+    acc
+}
+
+#[cfg(test)]
+mod build_connector_tests {
+    use super::*;
+    use crate::{JumpHop, TunnelLayer};
+
+    #[derive(Default)]
+    struct PrewarmProbe {
+        count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Connector for PrewarmProbe {
+        async fn connect(&self, _h: &str, _p: u16) -> Result<Pin<Box<dyn Stream>>> {
+            Err(Error::Connection("probe".into()))
+        }
+
+        async fn prewarm(&self) -> Result<()> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// `build_connector` type-checks: a `[Socks5, SshHop]` list folds into an
+    /// `Arc<dyn Connector>` (the concrete top is an `SshHopConnector` wrapping
+    /// a `Socks5Connector` wrapping the base `TcpConnector`).
+    #[tokio::test]
+    async fn build_connector_folds_layers_into_a_connector() {
+        let layers = vec![
+            TunnelLayer::Socks5 {
+                host: "p".into(),
+                port: 1080,
+                user: None,
+                password: None,
+            },
+            TunnelLayer::SshHop(JumpHop {
+                host: "gw".into(),
+                user: "u".into(),
+                password: Some("pw".into()),
+                key_path: None,
+                port: 22,
+            }),
+        ];
+        let _top: Arc<dyn Connector> = build_connector(&layers);
+    }
+
+    /// `prewarm` walks the WHOLE chain bottom-first: an
+    /// `SshHopConnector` over a `Socks5Connector` over a `PrewarmProbe`
+    /// must reach the probe (count == 1) before the SSH session
+    /// establishment fails on the probe's erroring `connect`.
+    #[tokio::test]
+    async fn prewarm_walks_the_full_chain_before_session_establish() {
+        let probe = Arc::new(PrewarmProbe::default());
+        let socks: Arc<dyn Connector> = Arc::new(Socks5Connector {
+            inner: probe.clone(),
+            proxy_host: "p".into(),
+            proxy_port: 1080,
+            user: None,
+            password: None,
+        });
+        let ssh = SshHopConnector::new(
+            socks,
+            JumpHop {
+                host: "gw".into(),
+                user: "u".into(),
+                password: Some("pw".into()),
+                key_path: None,
+                port: 22,
+            },
+        );
+
+        // prewarm walks inner (ssh -> socks -> probe.prewarm) first, then tries
+        // to establish the SSH session, which dials through the probe and fails.
+        let err = ssh.prewarm().await;
+        assert!(err.is_err(), "session establish must fail over the probe");
+        assert_eq!(
+            probe.count.load(SeqCst),
+            1,
+            "prewarm must reach the probe at the bottom of the chain"
+        );
     }
 }
 
