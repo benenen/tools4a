@@ -1,11 +1,13 @@
 ---
 name: ssh-bastion-checklist
-description: Use when `mysql_exec` (or any tools4a call with `tunnel=ssh`) fails at the SSH layer — connect failure, auth failure, direct-tcpip channel failure, or a multi-hop chain that drops between hops. Walks through diagnostic checks before changing the call.
+description: Use when `mysql_exec` (or any tools4a call with `tunnel=ssh` / `tunnel_layers` / `--hop`) fails at the SSH layer — connect failure, auth failure, direct-tcpip channel failure, or a multi-hop chain that drops between hops. Walks through diagnostic checks before changing the call.
 ---
 
 # SSH bastion / tunnel troubleshooting checklist
 
-`tools4a`'s SSH tunnel walks the chain `client → bastion1 → … → bastionN → target_host`. A failure in any of those edges produces a different error message. Pick the matching section, run the listed checks, then propose a fix.
+`tools4a`'s SSH tunnel walks the chain `client → bastion1 → … → bastionN → target_host`. Since Phase 21 this is expressed as an ordered `TunnelLayer` stack — either via legacy `tunnel=ssh` + `ssh_jump`/`ssh_*` fields, via the new `tunnel_layers` MCP array, or via the `--hop` CLI flag. A failure in any of those edges produces a different error message. Pick the matching section, run the listed checks, then propose a fix.
+
+**SOCKS5 underlay + SSH**: if the stack includes a SOCKS5 layer before the SSH hop (e.g. `tunnel_layers: [{type:"socks5",...},{type:"ssh",...}]` or `--hop 'socks5://...' --hop 'ssh://...'`), the first leg goes through the SOCKS5 proxy. An error labelled "SOCKS5" or "proxy" before the SSH error points to the proxy hop; errors after that are SSH-layer issues.
 
 ## Map error message → likely cause
 
@@ -31,13 +33,13 @@ The first hop is a plain TCP connection from your machine to the bastion. Check 
 
 ## B: Auth fails
 
-Auth happens once per hop. All hops share `ssh_user` / `ssh_password` / `ssh_key_path`.
+Auth happens once per hop. With legacy `ssh_jump` string form, all hops share `ssh_user` / `ssh_password` / `ssh_key_path`. With `tunnel_layers` or `--hop`, each SSH layer carries its own `user` / `password` / `key_path`.
 
 1. **Verify creds work via plain `ssh`**: `ssh -p <port> <ssh_user>@<bastion>`. If this also fails, the credentials are wrong.
-2. **If using `ssh_key_path`**: file permissions must be `600` (or `400`). `chmod 600 ~/.ssh/id_rsa`. Also: passphrase-protected keys are NOT supported in Phase 2/3 — convert to an unencrypted key (`ssh-keygen -p -f keyfile`) or use password auth.
+2. **If using `ssh_key_path` / `key_path`**: file permissions must be `600` (or `400`). `chmod 600 ~/.ssh/id_rsa`. Also: passphrase-protected keys are NOT supported — convert to an unencrypted key (`ssh-keygen -p -f keyfile`) or use password auth.
 3. **If using `ssh_password`**: bastion may have password auth disabled (`PasswordAuthentication no` in sshd_config). Switch to key auth.
 4. **Both supplied**: tools4a tries publickey first, then falls back to password. If publickey fails for any reason (bad key file, permissions, key not in `authorized_keys`), the password attempt happens next — so a `password authentication rejected` error means the FALLBACK also failed.
-5. **Per-hop auth difference**: not supported yet. If bastion1 and bastion2 need different credentials, this Phase can't reach the target. Phase 3+ may add per-hop overrides; for now, consolidate so all hops accept the same credential.
+5. **Per-hop auth difference**: use `tunnel_layers` (MCP) or `--hop` (CLI) to supply different credentials per hop. Example MCP form: `tunnel_layers: [{type:"ssh","host":"gw","user":"admin","password":"..."},{"type":"ssh","host":"db-node","user":"dbuser","key_path":"/home/me/.ssh/db_key"}]`. Legacy `ssh_jump` string/array form also supports per-hop objects — see the `tools4a-using` skill.
 
 ## C: Inside-tunnel failure (`direct-tcpip ... failed` / `chained ... failed`)
 
@@ -62,7 +64,16 @@ If `mysql_exec` doesn't return within ~30s and there's no error:
 To verify the tools4a tunnel itself works (separating "tunnel broken" from "MySQL broken"):
 
 ```bash
+# Legacy form
 tools4a --tunnel=ssh --ssh-jump=<bastion> --ssh-user=<user> --ssh-password=<pwd> \
+  mysql --host=127.0.0.1 --port=22 --user=anything --password=anything 'select 1'
+
+# Phase 21 --hop form (equivalent)
+tools4a --hop 'ssh://<user>:<pwd>@<bastion>' \
+  mysql --host=127.0.0.1 --port=22 --user=anything --password=anything 'select 1'
+
+# SOCKS5 underlay + SSH (test the full stack)
+tools4a --hop 'socks5://<proxy>:<port>' --hop 'ssh://<user>:<pwd>@<bastion>' \
   mysql --host=127.0.0.1 --port=22 --user=anything --password=anything 'select 1'
 ```
 

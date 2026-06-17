@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> 本文件与同目录的 [`AGENTS.md`](./AGENTS.md) 内容保持一致。修改任意一份时，请同步另一份。`AGENTS.md` 是给非 Claude 的 AI 编辑器（Cursor / Copilot / Codex 等）使用的等价文档。
+> [`AGENTS.md`](./AGENTS.md) 是指向本文件的符号链接（`AGENTS.md -> CLAUDE.md`），供非 Claude 的 AI 编辑器（Cursor / Copilot / Codex 等）读取。**只需维护本文件**，AGENTS.md 自动同步——不要再单独编辑 AGENTS.md。
 
 ## Project Overview
 

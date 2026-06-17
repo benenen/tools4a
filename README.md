@@ -1,17 +1,17 @@
 # tools4a
 
-Unified tool for SSH, MySQL, and Redis connections with MCP (Model Context Protocol) support.
+Unified CLI + MCP (Model Context Protocol) tool for MySQL, PostgreSQL, ClickHouse, Redis, MongoDB, HTTP, SSH, and Browser — with composable SSH + SOCKS5 tunnels.
 
 ## Features
 
 - **CLI Mode**: Execute commands directly from the command line
-- **MCP Mode**: Run as an MCP server for AI assistant integration (coming soon)
+- **MCP Mode**: Run as an MCP server for AI assistant integration
 - **Configuration**: Support for TOML profiles and YAML config files
-- **SSH Jump Host**: Access internal services through bastion hosts (coming soon)
+- **SSH Jump Host**: Access internal services through bastion hosts
 
 ## Status
 
-This is the Phase 14 Phase 2 release. Currently implemented:
+This is the Phase 21 release. Currently implemented:
 
 - All eight service orchestrators (`MysqlOrchestrator`, `PgsqlOrchestrator`, `ClickhouseOrchestrator`, `RedisOrchestrator`, `MongoOrchestrator`, `HttpOrchestrator`, `SshDirectOrchestrator`, `BrowserOrchestrator`) impl the `tools4a_core::Service` trait, defined as `async fn execute(Self::Request, Option<TunnelConfig>) -> Result<ExecutionResult>`. Each lives in its own leaf crate (`tools4a-mysql`, `tools4a-pgsql`, …) alongside the corresponding `<Svc>Mcp` impl of `tools4a_core::McpTool`.
 - MySQL CLI mode (`tools4a mysql "..."`) and `mysql_exec` MCP tool.
@@ -22,18 +22,21 @@ This is the Phase 14 Phase 2 release. Currently implemented:
 - HTTP CLI mode (`tools4a http GET https://...`) and `http_exec` MCP tool.
 - SSH-direct CLI mode (`tools4a ssh "..."`) and `ssh_exec` MCP tool —
   run a shell command on a target SSH server, optionally through SSH jump hosts.
-- **Browser CLI mode** (`tools4a browser <SUBCOMMAND> [ARGS]...`) and `browser_exec` MCP tool — thin wrapper around the externally-installed [`agent-browser`](https://github.com/vercel-labs/agent-browser) binary (operator installs it separately). `--tunnel=ssh` works via a built-in per-call SOCKS5 server (`SocksTunnel`) over the SSH chain — tools4a injects `--proxy socks5://127.0.0.1:<rand>` automatically.
+- **Browser CLI mode** (`tools4a browser <SUBCOMMAND> [ARGS]...`) and `browser_exec` MCP tool — thin wrapper around the externally-installed [`agent-browser`](https://github.com/vercel-labs/agent-browser) binary (operator installs it separately). Any SSH-containing layer stack stands up a `LayeredTunnel` with `ForwardTarget::Socks5Server` and injects `--proxy socks5://127.0.0.1:<rand>` automatically; a pure-SOCKS5 stack short-circuits to `--proxy socks5://…` directly without a local relay.
 - Configuration via YAML file (`--config=PATH`) or TOML profile (`--profile=NAME`)
   for MySQL, PostgreSQL, ClickHouse, Redis, and MongoDB. (HTTP, SSH-direct, and Browser profile/YAML not yet supported.)
-- Direct connection (`--tunnel=direct` or no `--tunnel`).
+- **Composable tunnel layer stack (Phase 21)** — `TunnelConfig` is now `struct { layers: Vec<TunnelLayer> }` (ordered local→target); `TunnelLayer` is either `Socks5 { host, port, user?, password? }` or `SshHop(JumpHop)`. Empty `layers` = direct. One generic `LayeredTunnel` (`impl Tunnel`) driven by `build_connector(&[TunnelLayer])` folds the layers (`TcpConnector` base → each layer wraps the inner connector); SSH layers cache their session in a `OnceCell` (one `direct-tcpip` channel per client connection → multi-client without head-of-line blocking). The old per-shape impls (`DirectTunnel`, `SshTunnel`, `Socks5ClientTunnel`, `SocksTunnel`, `StreamLocalTunnel`) have been removed.
+- Direct connection (no `--hop`/`--tunnel`, or `--tunnel=direct`).
 - SSH tunnel (`--tunnel=ssh`) with single- or multi-hop jump (`--ssh-jump=h1[,h2,...]`),
   password or key auth. Host keys accepted with a fingerprint warning.
-  Works for all eight services: seven use single-port `direct-tcpip` via `SshTunnel`; browser uses a built-in per-call SOCKS5 server (`SocksTunnel`) over the same SSH chain (because a browser needs to reach many target hosts dynamically, not one fixed endpoint).
-- External SOCKS5 proxy as a tunnel (`--tunnel=socks5 --socks5-host=H --socks5-port=P [--socks5-user=U --socks5-password=W]`, default port 1080, RFC 1929 user/pass auth supported). All tunneled services route through `Socks5ClientTunnel`; browser short-circuits and passes `socks5://[user:pass@]host:port` directly to agent-browser's `--proxy`. `ssh` and `docker` are the exceptions — they error on `--tunnel=socks5`.
+  Works for all eight services through the unified `LayeredTunnel`/`build_connector` layer model.
+- External SOCKS5 proxy (`--tunnel=socks5 --socks5-host=H --socks5-port=P [--socks5-user=U --socks5-password=W]`, default port 1080, RFC 1929 user/pass auth). All services route through the `LayeredTunnel` connector chain. Browser short-circuits a pure-SOCKS5 stack by passing `socks5://[user:pass@]host:port` directly to agent-browser's `--proxy`. `ssh` no longer errors on `--tunnel=socks5` (it routes through the layer chain). `docker` errors only when a non-empty stack does not end in an SSH hop (a `[Socks5, SshHop]` underlay is valid; socks5-only still errors for docker since streamlocal needs an SSH tail).
+- **Composable `--hop` flag (Phase 21)** — repeatable, ordered, URL-form. Mutually exclusive with legacy `--tunnel`/`--ssh-*`/`--socks5-*`; legacy flags still work and are lowered to layers. `--tunnel=ssh` + `--socks5-*` now composes (SOCKS5 underlay + SSH hop) instead of being an error.
+- **`tunnel_layers` MCP field (Phase 21)** — ordered JSON array of `{type:"socks5"|"ssh", host, port, user?, password?, key_path?}`. Conflicts with legacy `tunnel`/`ssh_jump`/`ssh_*`/`socks5_*` fields.
 - MCP server mode (`tools4a` with no subcommand) over stdio. SQL tools (mysql/pgsql/clickhouse) and HTTP tool return a second `Content::resource` (MCP App UI, MIME `text/html`) alongside the JSON text — clients without MCP Apps support ignore it.
 
 Not yet implemented:
-- SSH key passphrases, per-hop auth overrides, strict known_hosts verification
+- SSH key passphrases, strict known_hosts verification
 - SSH PTY allocation (interactive commands like `top` won't work)
 - HTTP / SSH-direct / Browser profile/YAML config
 - HTTP/SSE MCP transport (the SERVER's transport)
@@ -57,8 +60,8 @@ Rust toolchain install.
 
 This repo is a Cargo workspace. The `tools4a` binary crate lives at
 the repo root (presentation layer only). The lib crates under `crates/`
-are: `tools4a-core` (everything shared — trait floor + concrete
-`DirectTunnel` / `SshTunnel` impls + `build_tunnel` + Config/Profile
+are: `tools4a-core` (everything shared — trait floor + `LayeredTunnel`
++ `build_connector` + `ForwardTarget` + `build_tunnel` + Config/Profile
 /Loader/Merger + SSH `session` chain helpers + `McpTool` trait), and
 the eight leaf service crates `tools4a-mysql` / `tools4a-pgsql` /
 `tools4a-clickhouse` / `tools4a-redis` / `tools4a-mongo` /
@@ -125,6 +128,22 @@ tools4a --tunnel=socks5 --socks5-host=192.0.2.10 --socks5-port=2235 \
 tools4a --tunnel=socks5 --socks5-host=proxy.internal --socks5-user=alice \
   --socks5-password=s3cret \
   mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+
+# Composable --hop (Phase 21): SOCKS5 underlay → SSH → target (the canonical chain)
+tools4a --hop 'socks5://192.0.2.10:2235' \
+        --hop 'ssh://admin:pass@gateway.internal:22' \
+  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+
+# Composable --hop: SSH multi-hop with per-hop credentials
+tools4a --hop 'ssh://admin:pass@bastion1.com' \
+        --hop 'ssh://dbuser:pass@bastion2.internal' \
+  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+
+# tunnel-serve: local TCP port-forward through SOCKS5 → SSH (Phase 21)
+tools4a tunnel-serve --type tcp --listen 127.0.0.1:13306 \
+  --target-host mysql.internal --target-port 3306 \
+  --hop 'socks5://192.0.2.10:2235' \
+  --hop 'ssh://admin:pass@gateway.internal:22'
 ```
 
 ### PostgreSQL
@@ -239,18 +258,27 @@ tools4a browser --session work open https://example.com
 # Show structured output (exit_code/stdout/stderr table)
 tools4a browser snapshot --session work -i
 
-# Through an SSH bastion (tools4a binds a per-call SOCKS5 listener via SocksTunnel)
+# Through an SSH bastion (tools4a binds a per-call SOCKS5 listener via LayeredTunnel Socks5Server)
 tools4a --tunnel=ssh --ssh-jump=bastion.example.com --ssh-user=admin \
+  browser open https://internal.local --session work
+
+# Composable --hop for browser: SOCKS5 underlay → SSH bastion → browser
+tools4a --hop 'socks5://192.0.2.10:2235' \
+        --hop 'ssh://admin:pass@bastion.example.com' \
   browser open https://internal.local --session work
 ```
 
 `tools4a`'s exit code mirrors `agent-browser`'s, like the `ssh`
-subcommand. `--tunnel=ssh` works via a built-in SOCKS5 server (no
-external `ssh -D` needed) — tools4a opens the SSH session chain,
-binds `127.0.0.1:<random>`, and injects `--proxy socks5://...` into
-the agent-browser invocation; the listener is torn down when the
-call returns. If you set BOTH `--tunnel=ssh` AND `--proxy ...`,
-that's an `Error::Config` conflict — pick one.
+subcommand. Any SSH-containing layer stack (e.g. `--tunnel=ssh` or
+`--hop 'ssh://...'`) stands up a `LayeredTunnel` with
+`ForwardTarget::Socks5Server` (no external `ssh -D` needed) — tools4a
+binds `127.0.0.1:<random>` and injects `--proxy socks5://...` into the
+agent-browser invocation; the listener is torn down when the call
+returns. A pure-SOCKS5 stack (`--tunnel=socks5` or a single
+`--hop 'socks5://...'`) short-circuits by passing `--proxy socks5://…`
+directly to agent-browser without a local relay. If you set BOTH
+`--tunnel=ssh` AND `--proxy ...`, that's an `Error::Config` conflict —
+pick one.
 
 ### MCP Server
 
@@ -263,8 +291,12 @@ tools4a
 It exposes eight tools (`mysql_exec`, `pgsql_exec`, `clickhouse_exec`,
 `redis_exec`, `mongo_exec`, `http_exec`, `ssh_exec`, `browser_exec`) —
 one per service. Each tool accepts the same parameters as the
-corresponding CLI subcommand plus the shared tunnel fields (`tunnel`,
-`ssh_jump`, `ssh_user`, `ssh_password`, `ssh_key_path`, `ssh_port`).
+corresponding CLI subcommand plus the shared tunnel fields. The
+preferred form (Phase 21) is `tunnel_layers` (an ordered JSON array of
+`{type:"socks5"|"ssh", host, port, user?, password?, key_path?}`);
+legacy flat fields (`tunnel`, `ssh_jump`, `ssh_user`, `ssh_password`,
+`ssh_key_path`, `ssh_port`, `socks5_host`, `socks5_port`, etc.) still
+work and are lowered to layers automatically.
 `browser_exec` additionally requires the [`agent-browser`](https://github.com/vercel-labs/agent-browser)
 binary to be installed on `$PATH` (or via `$AGENT_BROWSER_BIN`) — tools4a
 shells out to it and captures stdout/stderr/exit_code. AI clients
