@@ -56,6 +56,13 @@ pub struct DockerConnectionFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5_password: Option<String>,
 
+    /// Ordered transport hop stack (local->target), the general form.
+    /// Each element is `{"type":"socks5",...}` or `{"type":"ssh",...}`.
+    /// Mutually exclusive with the legacy `tunnel`/`ssh_*`/`socks5_*`
+    /// fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_layers: Option<Vec<tools4a_core::mcp::TunnelLayerInput>>,
+
     /// Per-call timeout (seconds). Defaults to 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
@@ -71,6 +78,7 @@ fn build_req(
     allow_write: bool,
 ) -> Result<(DockerRequest, Option<tools4a_core::TunnelConfig>)> {
     let tunnel = build_tunnel_config(
+        conn.tunnel_layers,
         conn.tunnel,
         conn.ssh_jump,
         conn.ssh_user,

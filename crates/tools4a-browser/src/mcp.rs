@@ -73,6 +73,13 @@ pub struct BrowserExecParams {
     pub socks5_user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5_password: Option<String>,
+
+    /// Ordered transport hop stack (local->target), the general form.
+    /// Each element is `{"type":"socks5",...}` or `{"type":"ssh",...}`.
+    /// Mutually exclusive with the legacy `tunnel`/`ssh_*`/`socks5_*`
+    /// fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_layers: Option<Vec<tools4a_core::mcp::TunnelLayerInput>>,
 }
 
 pub struct BrowserMcp;
@@ -98,6 +105,7 @@ impl McpTool for BrowserMcp {
         };
 
         let tunnel = build_tunnel_config(
+            params.tunnel_layers,
             params.tunnel,
             params.ssh_jump,
             params.ssh_user,
@@ -143,6 +151,7 @@ mod tests {
             socks5_port: None,
             socks5_user: None,
             socks5_password: None,
+            tunnel_layers: None,
         };
         let err = BrowserMcp::invoke(params).await.unwrap_err();
         let msg = format!("{err}");

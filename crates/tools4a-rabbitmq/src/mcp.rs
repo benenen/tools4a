@@ -59,6 +59,13 @@ pub struct RabbitmqConnectionFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5_password: Option<String>,
 
+    /// Ordered transport hop stack (local->target), the general form.
+    /// Each element is `{"type":"socks5",...}` or `{"type":"ssh",...}`.
+    /// Mutually exclusive with the legacy `tunnel`/`ssh_*`/`socks5_*`
+    /// fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_layers: Option<Vec<tools4a_core::mcp::TunnelLayerInput>>,
+
     /// Per-call timeout (seconds). Default 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
@@ -74,6 +81,7 @@ fn build_req(
     let password = conn.password.unwrap_or_else(|| "guest".to_string());
 
     let tunnel = build_tunnel_config(
+        conn.tunnel_layers,
         conn.tunnel,
         conn.ssh_jump,
         conn.ssh_user,

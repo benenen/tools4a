@@ -52,6 +52,13 @@ pub struct MilvusConnectionFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5_password: Option<String>,
 
+    /// Ordered transport hop stack (local->target), the general form.
+    /// Each element is `{"type":"socks5",...}` or `{"type":"ssh",...}`.
+    /// Mutually exclusive with the legacy `tunnel`/`ssh_*`/`socks5_*`
+    /// fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_layers: Option<Vec<tools4a_core::mcp::TunnelLayerInput>>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 }
@@ -64,6 +71,7 @@ fn build_req(
     let scheme = conn.scheme.unwrap_or_else(|| "http".to_string());
     let port = conn.port.unwrap_or(DEFAULT_PORT);
     let tunnel = build_tunnel_config(
+        conn.tunnel_layers,
         conn.tunnel,
         conn.ssh_jump,
         conn.ssh_user,

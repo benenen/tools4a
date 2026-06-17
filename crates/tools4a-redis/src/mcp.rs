@@ -50,6 +50,13 @@ pub struct RedisExecParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5_password: Option<String>,
 
+    /// Ordered transport hop stack (local->target), the general form.
+    /// Each element is `{"type":"socks5",...}` or `{"type":"ssh",...}`.
+    /// Mutually exclusive with the legacy `tunnel`/`ssh_*`/`socks5_*`
+    /// fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_layers: Option<Vec<tools4a_core::mcp::TunnelLayerInput>>,
+
     /// Per-call execution timeout in seconds. Capped by the operator's
     /// `TOOLS4A_MAX_TIMEOUT_SECS` env var or TOML `[defaults]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +107,7 @@ fn params_to_config(p: &RedisExecParams, toml: Option<TomlConfig>) -> Result<Con
     }
 
     let tunnel_config = build_tunnel_config(
+        p.tunnel_layers.clone(),
         p.tunnel.clone(),
         p.ssh_jump.clone(),
         p.ssh_user.clone(),
