@@ -3,6 +3,7 @@
 //! session as a `direct-tcpip` channel. The codec sub-module is
 //! pure (bytes in -> bytes out, no IO).
 
+pub(crate) mod client;
 pub mod codec;
 pub mod connector;
 pub mod server;

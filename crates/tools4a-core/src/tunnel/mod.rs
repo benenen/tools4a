@@ -3,6 +3,7 @@
 //! `<Svc>Orchestrator::execute` calls `build_tunnel` to produce the
 //! right tunnel before dispatching to its lib's `execute`.
 
+mod chain;
 mod direct;
 pub mod socks;
 mod socks5_client_tunnel;

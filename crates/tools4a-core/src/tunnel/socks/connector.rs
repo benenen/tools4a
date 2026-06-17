@@ -24,6 +24,13 @@ pub trait Connector: Send + Sync {
     /// resolve, if at all — SshConnector forwards the literal name
     /// through SSH `direct-tcpip` so the bastion does the resolution.
     async fn connect(&self, host: &str, port: u16) -> Result<Pin<Box<dyn Stream>>>;
+
+    /// Eagerly establish any cached state (e.g. an SSH session) so failures
+    /// surface at tunnel `establish()` time, not on the first client byte.
+    /// Default: nothing to warm.
+    async fn prewarm(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Production impl: open a russh `direct-tcpip` channel and wrap
