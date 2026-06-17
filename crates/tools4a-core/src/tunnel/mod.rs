@@ -5,6 +5,7 @@
 
 mod chain;
 mod direct;
+mod layered;
 pub mod socks;
 mod socks5_client_tunnel;
 mod socks_tunnel;
@@ -15,6 +16,7 @@ use crate::{Result, Tunnel, TunnelConfig};
 
 pub use chain::build_connector;
 pub use direct::DirectTunnel;
+pub use layered::{ForwardTarget, LayeredTunnel};
 pub use socks::connector::Connector;
 pub use socks_tunnel::SocksTunnel;
 pub use socks5_client_tunnel::Socks5ClientTunnel;
@@ -22,33 +24,21 @@ pub use ssh::SshTunnel;
 pub use streamlocal::StreamLocalTunnel;
 
 /// Build the appropriate tunnel for a target `(host, port)` from a
-/// `TunnelConfig`. `None` is treated as `Direct`.
+/// `TunnelConfig`. `None` is treated as a direct connection. Lowers the
+/// whole layer stack to a single `LayeredTunnel` whose folded connector
+/// reaches the target through every layer, and which forwards the local
+/// listen port to `(target_host, target_port)`.
 pub fn build_tunnel(
     target_host: String,
     target_port: u16,
     tunnel_config: Option<TunnelConfig>,
 ) -> Result<Box<dyn Tunnel>> {
-    match tunnel_config {
-        None | Some(TunnelConfig::Direct) => {
-            Ok(Box::new(DirectTunnel::new(target_host, target_port)))
-        }
-        Some(TunnelConfig::Ssh { ssh_jumps }) => Ok(Box::new(SshTunnel::new(
-            ssh_jumps,
-            target_host,
-            target_port,
-        )?)),
-        Some(TunnelConfig::Socks5 {
-            socks5_host,
-            socks5_port,
-            socks5_user,
-            socks5_password,
-        }) => Ok(Box::new(Socks5ClientTunnel::new(
-            socks5_host,
-            socks5_port,
-            socks5_user,
-            socks5_password,
-            target_host,
-            target_port,
-        )?)),
-    }
+    let cfg = tunnel_config.unwrap_or_else(TunnelConfig::direct);
+    Ok(Box::new(LayeredTunnel::new(
+        &cfg,
+        ForwardTarget::Tcp {
+            host: target_host,
+            port: target_port,
+        },
+    )))
 }
