@@ -1,12 +1,12 @@
 //! Core traits and shared types for the tools4a workspace.
 //!
 //! Holds the trait floor (`Tunnel`, `Connection`, `Service`, `McpTool`),
-//! shared error/result types, the `TunnelConfig` enum, the
-//! Profile/YAML/CLI 3-layer Config types, the concrete `DirectTunnel`
-//! and `SshTunnel` runtime impls, and the SSH `session` helpers shared
-//! between `SshTunnel` and `tools4a-ssh`'s `SshExec`. Per-service
-//! orchestrator + MCP impls live in their leaf crate (`tools4a-mysql`,
-//! `tools4a-pgsql`, …).
+//! shared error/result types, the `TunnelConfig` ordered-layer struct,
+//! the Profile/YAML/CLI 3-layer Config types, the `LayeredTunnel`
+//! runtime impl + connector-chain engine, and the SSH `session` helpers
+//! shared between the tunnel impls and `tools4a-ssh`'s `SshExec`.
+//! Per-service orchestrator + MCP impls live in their leaf crate
+//! (`tools4a-mysql`, `tools4a-pgsql`, …).
 
 pub mod config;
 pub mod mcp;
@@ -17,7 +17,10 @@ pub mod timeout;
 pub mod toon;
 pub mod tunnel;
 
-pub use mcp::{McpTool, SshJumpInput, TunnelKind, build_tunnel_config};
+pub use mcp::{
+    McpTool, SshJumpInput, TunnelKind, TunnelLayerInput, build_tunnel_config,
+    layer_inputs_to_config,
+};
 pub use result_compression::{
     ColumnInfo, ColumnStats, CompressedResult, CompressionInfo, CompressionStrategy,
 };
@@ -26,8 +29,8 @@ pub use timeout::{
 };
 pub use toon::{compressed_to_toon, to_toon};
 pub use tunnel::{
-    Connector, DirectTunnel, Socks5ClientTunnel, SocksTunnel, SshTunnel, StreamLocalTunnel,
-    build_connector, build_tunnel,
+    Connector, DirectTunnel, ForwardTarget, LayeredTunnel, Socks5ClientTunnel, SocksTunnel,
+    SshTunnel, StreamLocalTunnel, build_connector, build_tunnel,
 };
 
 use async_trait::async_trait;
@@ -208,30 +211,74 @@ impl std::fmt::Debug for JumpHop {
     }
 }
 
-/// Tunnel selection plus its parameters. Shared shape across all services.
-/// Runtime impls (`DirectTunnel`, `SshTunnel`, `Socks5ClientTunnel`) live
-/// in this crate's `tunnel` module.
+/// Tunnel selection plus its parameters: an ordered transport stack,
+/// local→target. An empty layer list is a direct connection. Runtime
+/// impls fold the layers into a `Connector` chain (`build_connector`)
+/// driven by a `LayeredTunnel`. Constructor helpers (`direct`/`ssh`/
+/// `socks5`/`layered`) and accessors (`is_direct`/`ssh_jumps`/
+/// `last_layer_is_ssh`) preserve most call-site ergonomics from the old
+/// 3-variant enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum TunnelConfig {
-    Direct,
-    Ssh {
-        /// Resolved jump-hop list in client→target order. Each hop carries
-        /// its own credentials. The MCP and CLI builders fold pre-merge
-        /// top-level `ssh_user`/`ssh_password`/etc. into each hop before
-        /// constructing this; consumers see a fully-resolved per-hop view.
-        ssh_jumps: Vec<JumpHop>,
-    },
-    /// Route through an already-running external SOCKS5 proxy. Phase 19.
-    Socks5 {
-        socks5_host: String,
-        #[serde(default = "default_socks5_port")]
-        socks5_port: u16,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        socks5_user: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        socks5_password: Option<String>,
-    },
+pub struct TunnelConfig {
+    #[serde(default)]
+    pub layers: Vec<TunnelLayer>,
+}
+
+impl TunnelConfig {
+    /// A direct (no-hop) connection.
+    pub fn direct() -> Self {
+        Self { layers: vec![] }
+    }
+
+    /// An all-SSH jump chain, in client→target order.
+    pub fn ssh(jumps: Vec<JumpHop>) -> Self {
+        Self {
+            layers: jumps.into_iter().map(TunnelLayer::SshHop).collect(),
+        }
+    }
+
+    /// A single external SOCKS5 proxy hop.
+    pub fn socks5(host: String, port: u16, user: Option<String>, password: Option<String>) -> Self {
+        Self {
+            layers: vec![TunnelLayer::Socks5 {
+                host,
+                port,
+                user,
+                password,
+            }],
+        }
+    }
+
+    /// An arbitrary ordered layer stack.
+    pub fn layered(layers: Vec<TunnelLayer>) -> Self {
+        Self { layers }
+    }
+
+    /// True when there are no transport layers (a direct connection).
+    pub fn is_direct(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// `Some(jumps)` iff EVERY layer is an SSH hop (no socks5 underlay) —
+    /// lets callers that still think in "jump chain" terms keep working.
+    /// `None` if any layer is a SOCKS5 hop.
+    pub fn ssh_jumps(&self) -> Option<Vec<JumpHop>> {
+        let mut out = Vec::with_capacity(self.layers.len());
+        for l in &self.layers {
+            match l {
+                TunnelLayer::SshHop(h) => out.push(h.clone()),
+                TunnelLayer::Socks5 { .. } => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// True iff the innermost (closest-to-target) layer is an SSH hop.
+    /// Required by SocksTunnel / streamlocal / ssh-exec, which need a real
+    /// SSH session at the end of the chain.
+    pub fn last_layer_is_ssh(&self) -> bool {
+        matches!(self.layers.last(), Some(TunnelLayer::SshHop(_)))
+    }
 }
 
 fn default_ssh_port() -> u16 {
@@ -285,106 +332,121 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tunnel_config_ssh_round_trips_via_yaml() {
-        // TunnelConfig::Ssh now holds Vec<JumpHop>; we construct and
-        // serialize/deserialize rather than parsing legacy YAML.
+    fn ssh_config_builds_from_jumps() {
         let hop = JumpHop {
-            host: "bastion.com".to_string(),
-            user: "admin".to_string(),
-            password: Some("pw".to_string()),
+            host: "bastion.com".into(),
+            user: "admin".into(),
+            password: Some("pw".into()),
             key_path: None,
             port: 22,
         };
-        let cfg = TunnelConfig::Ssh {
-            ssh_jumps: vec![hop],
-        };
+        let cfg = TunnelConfig::ssh(vec![hop]);
+        let jumps = cfg.ssh_jumps().expect("all-ssh");
+        assert_eq!(jumps.len(), 1);
+        assert_eq!(jumps[0].host, "bastion.com");
+        assert_eq!(jumps[0].user, "admin");
+        assert!(!cfg.is_direct());
+        assert!(cfg.last_layer_is_ssh());
+    }
+
+    #[test]
+    fn direct_has_no_layers() {
+        let cfg = TunnelConfig::direct();
+        assert!(cfg.is_direct());
+        assert!(!cfg.last_layer_is_ssh());
+        // No layers → an empty (but Some) jump chain.
+        assert_eq!(cfg.ssh_jumps().map(|j| j.len()), Some(0));
+    }
+
+    #[test]
+    fn socks5_is_single_layer_and_not_a_jump_chain() {
+        let cfg = TunnelConfig::socks5("p".into(), 2235, Some("u".into()), Some("pw".into()));
+        assert_eq!(cfg.layers.len(), 1);
+        assert!(!cfg.is_direct());
+        assert!(cfg.ssh_jumps().is_none()); // a socks5 layer is not a jump
+        assert!(!cfg.last_layer_is_ssh());
+        match &cfg.layers[0] {
+            TunnelLayer::Socks5 {
+                host,
+                port,
+                user,
+                password,
+            } => {
+                assert_eq!(host, "p");
+                assert_eq!(*port, 2235);
+                assert_eq!(user.as_deref(), Some("u"));
+                assert_eq!(password.as_deref(), Some("pw"));
+            }
+            _ => panic!("expected Socks5 layer"),
+        }
+    }
+
+    #[test]
+    fn socks5_then_ssh_is_not_pure_jump_chain() {
+        let cfg = TunnelConfig::layered(vec![
+            TunnelLayer::Socks5 {
+                host: "p".into(),
+                port: 2235,
+                user: None,
+                password: None,
+            },
+            TunnelLayer::SshHop(JumpHop {
+                host: "127.0.0.1".into(),
+                user: "admin".into(),
+                password: Some("x".into()),
+                key_path: None,
+                port: 3203,
+            }),
+        ]);
+        assert!(cfg.ssh_jumps().is_none()); // has a socks5 layer
+        assert!(cfg.last_layer_is_ssh()); // ends on SSH → can host a target
+        assert!(!cfg.is_direct());
+    }
+
+    #[test]
+    fn tunnel_config_round_trips_via_yaml() {
+        let cfg = TunnelConfig::layered(vec![
+            TunnelLayer::Socks5 {
+                host: "proxy.internal".into(),
+                port: 1080,
+                user: None,
+                password: None,
+            },
+            TunnelLayer::SshHop(JumpHop {
+                host: "bastion.com".into(),
+                user: "admin".into(),
+                password: Some("pw".into()),
+                key_path: None,
+                port: 22,
+            }),
+        ]);
         let yaml = serde_yml::to_string(&cfg).unwrap();
         let back: TunnelConfig = serde_yml::from_str(&yaml).unwrap();
-        match back {
-            TunnelConfig::Ssh { ssh_jumps } => {
-                assert_eq!(ssh_jumps.len(), 1);
-                assert_eq!(ssh_jumps[0].host, "bastion.com");
-                assert_eq!(ssh_jumps[0].user, "admin");
-            }
-            _ => panic!("expected Ssh"),
-        }
+        assert_eq!(back.layers.len(), 2);
+        assert!(back.ssh_jumps().is_none());
+        assert!(back.last_layer_is_ssh());
     }
 
     #[test]
-    fn test_tunnel_config_socks5_minimal_yaml() {
-        let yaml = r#"
-type: socks5
-socks5_host: 192.0.2.10
-"#;
-        let cfg: TunnelConfig = serde_yml::from_str(yaml).unwrap();
-        match cfg {
-            TunnelConfig::Socks5 {
-                socks5_host,
-                socks5_port,
-                socks5_user,
-                socks5_password,
-            } => {
-                assert_eq!(socks5_host, "192.0.2.10");
-                assert_eq!(socks5_port, 1080);
-                assert!(socks5_user.is_none());
-                assert!(socks5_password.is_none());
+    fn tunnel_config_round_trips_via_toml() {
+        // Profile uses TOML; verify the struct survives a TOML round-trip.
+        let cfg = TunnelConfig::socks5("p".into(), 2235, Some("u".into()), Some("pw".into()));
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let back: TunnelConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.layers.len(), 1);
+        match &back.layers[0] {
+            TunnelLayer::Socks5 { port, user, .. } => {
+                assert_eq!(*port, 2235);
+                assert_eq!(user.as_deref(), Some("u"));
             }
             _ => panic!("expected Socks5"),
         }
     }
 
     #[test]
-    fn test_tunnel_config_socks5_full_yaml() {
-        let yaml = r#"
-type: socks5
-socks5_host: proxy.internal
-socks5_port: 2235
-socks5_user: alice
-socks5_password: s3cret
-"#;
-        let cfg: TunnelConfig = serde_yml::from_str(yaml).unwrap();
-        match cfg {
-            TunnelConfig::Socks5 {
-                socks5_host,
-                socks5_port,
-                socks5_user,
-                socks5_password,
-            } => {
-                assert_eq!(socks5_host, "proxy.internal");
-                assert_eq!(socks5_port, 2235);
-                assert_eq!(socks5_user.as_deref(), Some("alice"));
-                assert_eq!(socks5_password.as_deref(), Some("s3cret"));
-            }
-            _ => panic!("expected Socks5"),
-        }
-    }
-
-    #[test]
-    fn test_tunnel_config_socks5_serialize_skips_none_auth() {
-        let cfg = TunnelConfig::Socks5 {
-            socks5_host: "p".into(),
-            socks5_port: 1080,
-            socks5_user: None,
-            socks5_password: None,
-        };
-        let yaml = serde_yml::to_string(&cfg).unwrap();
-        assert!(!yaml.contains("socks5_user"), "{yaml}");
-        assert!(!yaml.contains("socks5_password"), "{yaml}");
-        // And round-trips cleanly.
-        let back: TunnelConfig = serde_yml::from_str(&yaml).unwrap();
-        match back {
-            TunnelConfig::Socks5 {
-                socks5_host,
-                socks5_user,
-                socks5_password,
-                ..
-            } => {
-                assert_eq!(socks5_host, "p");
-                assert!(socks5_user.is_none());
-                assert!(socks5_password.is_none());
-            }
-            _ => panic!("expected Socks5"),
-        }
+    fn empty_layers_yaml_deserializes_to_direct() {
+        let cfg: TunnelConfig = serde_yml::from_str("layers: []").unwrap();
+        assert!(cfg.is_direct());
     }
 
     #[test]
@@ -423,30 +485,5 @@ socks5_password: s3cret
             !debug_none.contains("secret"),
             "no password should be present, got: {debug_none}"
         );
-    }
-
-    #[test]
-    fn test_tunnel_config_socks5_toml_round_trip() {
-        // Verifies the variant works under TOML (Profile uses TOML), since
-        // serde_yml and toml have slightly different defaults around enums.
-        let cfg = TunnelConfig::Socks5 {
-            socks5_host: "p".into(),
-            socks5_port: 2235,
-            socks5_user: Some("u".into()),
-            socks5_password: Some("pw".into()),
-        };
-        let toml_str = toml::to_string(&cfg).unwrap();
-        let back: TunnelConfig = toml::from_str(&toml_str).unwrap();
-        match back {
-            TunnelConfig::Socks5 {
-                socks5_port,
-                socks5_user,
-                ..
-            } => {
-                assert_eq!(socks5_port, 2235);
-                assert_eq!(socks5_user.as_deref(), Some("u"));
-            }
-            _ => panic!("expected Socks5"),
-        }
     }
 }
