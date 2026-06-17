@@ -204,7 +204,7 @@ pub fn write_request_reply(rep: ReplyCode, atyp_echo: u8, host: &str, port: u16)
 }
 
 // ============================================================================
-// Client-side encoders/parsers (used by `Socks5ClientTunnel`).
+// Client-side encoders/parsers (used by `Socks5Connector`).
 // Mirror of the server-side helpers above.
 // ============================================================================
 
@@ -383,7 +383,7 @@ pub fn parse_connect_reply(buf: &[u8]) -> Result<()> {
 
 /// Compute how many ATYP-dependent body bytes follow `VER REP RSV ATYP` in
 /// the connect reply. Returns `None` if the ATYP is unsupported. Used by
-/// `Socks5ClientTunnel` to read the reply incrementally without buffering
+/// `Socks5Connector` to read the reply incrementally without buffering
 /// a worst-case 262-byte response.
 pub fn connect_reply_body_len(atyp: u8, first_addr_byte: u8) -> Option<usize> {
     match atyp {

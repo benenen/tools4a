@@ -1,6 +1,7 @@
-//! `MilvusOrchestrator` — Service impl. Builds an SshTunnel if requested,
-//! points the gRPC URI at the tunnel local endpoint, gates write actions
-//! behind `allow_write`, dispatches via `run::run`.
+//! `MilvusOrchestrator` — Service impl. Builds a `LayeredTunnel` if a
+//! tunnel stack is provided, points the gRPC URI at the tunnel local
+//! endpoint, gates write actions behind `allow_write`, dispatches via
+//! `run::run`.
 
 use std::time::Duration;
 

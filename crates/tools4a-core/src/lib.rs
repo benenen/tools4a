@@ -271,7 +271,7 @@ impl TunnelConfig {
     }
 
     /// True iff the innermost (closest-to-target) layer is an SSH hop.
-    /// Required by SocksTunnel / streamlocal / ssh-exec, which need a real
+    /// Required by the Socks5Server / StreamLocal / ssh-exec paths, which need a real
     /// SSH session at the end of the chain.
     pub fn last_layer_is_ssh(&self) -> bool {
         matches!(self.layers.last(), Some(TunnelLayer::SshHop(_)))

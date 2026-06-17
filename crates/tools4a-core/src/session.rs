@@ -1,4 +1,4 @@
-//! SSH session-chain primitives. Used by both `SshTunnel` (in this crate)
+//! SSH session-chain primitives. Used by `SshHopConnector` (in this crate)
 //! and `SshExec` (in `tools4a-ssh`) to walk a chain of SSH jump hosts and
 //! end up with one or more authenticated SSH sessions.
 

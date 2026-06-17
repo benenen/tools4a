@@ -106,7 +106,7 @@ impl SshHopConnector {
     }
 
     /// Establish (or reuse) the SSH session on this hop and hand back the
-    /// shared handle. Used by `StreamLocalTunnel`, which needs a real SSH
+    /// shared handle. Used by the StreamLocal forward path, which needs a real SSH
     /// session at the innermost hop to open `direct-streamlocal` channels.
     pub(crate) async fn handle(&self) -> Result<SshHandle> {
         self.ensure_session().await
@@ -195,9 +195,10 @@ fn fold_layer(acc: Arc<dyn Connector>, layer: &TunnelLayer) -> Arc<dyn Connector
 
 /// Fold a layer list whose innermost (last) layer MUST be an SSH hop,
 /// returning the concrete `Arc<SshHopConnector>` for that final hop. The
-/// `StreamLocalTunnel` needs this concrete type so it can grab the SSH
-/// handle and open `direct-streamlocal` channels (which `Connector::connect`
-/// — a TCP-shaped API — can't express). Errors if `layers` is empty or
+/// `ForwardTarget::StreamLocal` path in `LayeredTunnel` needs this
+/// concrete type so it can grab the SSH handle and open
+/// `direct-streamlocal` channels (which `Connector::connect` — a
+/// TCP-shaped API — can't express). Errors if `layers` is empty or
 /// doesn't end in an SSH hop.
 pub(crate) fn build_streamlocal_connector(layers: &[TunnelLayer]) -> Result<Arc<SshHopConnector>> {
     let Some((last, init)) = layers.split_last() else {

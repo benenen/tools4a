@@ -1,7 +1,8 @@
 //! Docker leaf crate: typed Docker Engine API access via bollard, with
 //! three connection modes — local Unix socket, local/remote TCP, and
-//! remote Unix socket via `tools4a_core::StreamLocalTunnel`. Seven
-//! MCP tools share one orchestrator and one action dispatcher.
+//! remote Unix socket via `LayeredTunnel` with a StreamLocal forward
+//! target. Seven MCP tools share one orchestrator and one action
+//! dispatcher.
 //!
 //! See `docs/superpowers/plans/2026-05-14-tools-mcp-phase15-docker.md`.
 

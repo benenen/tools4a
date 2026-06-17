@@ -1,7 +1,8 @@
 //! SSH stack: command-exec primitives, the `SshDirectOrchestrator`
 //! `Service` impl, and the `SshMcp` `McpTool` impl. Session-chain
 //! helpers (`AcceptAnyHostKey`, `authenticate`, `build_session_chain`)
-//! live in `tools4a-core` so `core::SshTunnel` can also use them.
+//! live in `tools4a-core` so `SshHopConnector` (inside `LayeredTunnel`)
+//! can also use them.
 
 pub mod exec;
 pub mod execute;

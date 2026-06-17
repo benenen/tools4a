@@ -1,6 +1,6 @@
 //! Shared SOCKS5 *client* handshake — greeting → optional userpass auth →
-//! CONNECT — over any AsyncRead+AsyncWrite stream. Used by both
-//! `Socks5ClientTunnel` (legacy) and the layer-stack `Socks5Connector`.
+//! CONNECT — over any AsyncRead+AsyncWrite stream. Used by the
+//! layer-stack `Socks5Connector` (in `chain.rs`).
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

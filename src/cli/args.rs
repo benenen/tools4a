@@ -586,8 +586,9 @@ pub enum Commands {
         #[arg(long = "docker-host", global = true, help_heading = "Docker")]
         docker_host: Option<String>,
 
-        /// Remote unix socket path. Only valid with --tunnel=ssh; uses
-        /// StreamLocalTunnel to forward the remote socket through SSH.
+        /// Remote unix socket path. Only valid with a tunnel stack ending
+        /// in an SSH hop; uses LayeredTunnel (StreamLocal target) to
+        /// forward the remote socket through SSH.
         #[arg(long = "unix-socket", global = true, help_heading = "Docker")]
         unix_socket: Option<String>,
 

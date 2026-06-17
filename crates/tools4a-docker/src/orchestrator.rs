@@ -5,14 +5,17 @@
 //! 1. **Local Unix socket** — `docker_host = unix:///var/run/docker.sock`,
 //!    no tunnel. Pass through to `Docker::connect_with_unix`.
 //! 2. **Local or remote TCP** — `docker_host = tcp://host:port` or
-//!    `host:port`. If `tunnel = ssh`, build an `SshTunnel` and connect
-//!    to its local TCP endpoint instead.
+//!    `host:port`. If a tunnel stack ending in an SSH hop is provided,
+//!    build a `LayeredTunnel` with `ForwardTarget::Tcp` and connect to
+//!    its local TCP endpoint instead.
 //! 3. **Remote Unix socket via SSH** — `unix_socket = Some("/var/run/...")`
-//!    plus `tunnel = ssh`. Builds a `StreamLocalTunnel` that exposes
-//!    the remote socket as a local TCP port; bollard talks plain HTTP
-//!    to it.
+//!    plus a tunnel stack ending in an SSH hop. Builds a `LayeredTunnel`
+//!    with `ForwardTarget::StreamLocal` that exposes the remote socket as
+//!    a local TCP port; bollard talks plain HTTP to it.
 //!
-//! Conflict guard: `unix_socket = Some(_)` requires `tunnel = ssh`.
+//! Conflict guard: `unix_socket = Some(_)` requires a tunnel stack ending
+//! in an SSH hop. A socks5-only stack is allowed as an underlay but
+//! the outermost (target-side) layer must be `SshHop`.
 
 use crate::actions::DockerAction;
 use crate::connection::{ConnectTarget, connect_docker, parse_docker_host};
@@ -33,8 +36,8 @@ pub struct DockerRequest {
     /// - `tcp://host:port` (or bare `host:port`)
     pub docker_host: String,
     /// If set, ignored unless `tunnel = ssh`. Forwards the remote unix
-    /// socket at this path through `StreamLocalTunnel`. Lets you reach
-    /// `/var/run/docker.sock` on a remote host behind SSH.
+    /// socket at this path through a `LayeredTunnel` (StreamLocal target).
+    /// Lets you reach `/var/run/docker.sock` on a remote host behind SSH.
     pub unix_socket: Option<String>,
     /// Write actions (run/restart) require this to be `true`. Read-only
     /// actions (ps/inspect/logs/stats/top) always run.
@@ -45,8 +48,8 @@ pub struct DockerRequest {
 pub struct DockerOrchestrator;
 
 /// One active tunnel handle held for the duration of a single call. We
-/// box it under a trait so both `SshTunnel` and `StreamLocalTunnel`
-/// satisfy the same shape.
+/// box it under a trait so any `LayeredTunnel` variant (Tcp or
+/// StreamLocal forward target) satisfies the same shape.
 type ActiveTunnel = Arc<Mutex<Box<dyn Tunnel>>>;
 
 #[async_trait]

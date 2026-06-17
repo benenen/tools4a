@@ -57,16 +57,24 @@ description: Use when calling any of the eight tools4a MCP tools (`mysql_exec` /
 // If you set BOTH tunnel=ssh AND an explicit proxy, that's Error::Config (conflict).
 ```
 
-All four tools also accept the same tunnel fields:
+All tools also accept the same tunnel fields. The recommended new form uses `tunnel_layers` (ordered, composable):
+```json
+"tunnel_layers": [
+  {"type": "socks5", "host": "192.0.2.10", "port": 2235},
+  {"type": "ssh",    "host": "127.0.0.1", "port": 3203, "user": "admin", "password": "..."}
+]
 ```
-"tunnel": "ssh",                  // "direct" (default) | "ssh"
+Legacy flat fields still work and are lowered to layers automatically:
+```
+"tunnel": "ssh",                  // "direct" (default) | "ssh" | "socks5"
 "ssh_jump": "bastion.com",        // string OR comma-separated OR JSON array
 "ssh_user": "jumper",
 "ssh_password": "...",            // OR ssh_key_path
 "ssh_port": 22
 ```
+`tunnel_layers` conflicts with any legacy `tunnel`/`ssh_*`/`socks5_*` fields — use one form or the other.
 
-`tunnel="direct"` rejects stray `ssh_*` fields with a clear error.
+Since Phase 21, `tunnel="ssh"` + `socks5_*` fields (previously an error) now compose: the socks5 leg is prepended as an underlay and the SSH hop goes on top.
 
 ## Three-layer config priority (mysql / pgsql / redis / mongo)
 
@@ -74,7 +82,35 @@ Low → high: TOML profile (`~/.config/tools4a/config.toml [profiles.<NAME>]`) �
 
 HTTP and SSH-direct have no profile/YAML — pass all fields explicitly.
 
-## SSH tunnel syntax
+## Tunnel layer syntax (Phase 21+)
+
+The preferred form for any tunnel chain — whether a single hop, multi-hop, SOCKS5 underlay + SSH, or just SSH — is `tunnel_layers` (an ordered list of layers, local→target):
+
+```json
+// SOCKS5 proxy only (e.g. reach a service behind 192.0.2.10:2235)
+{"tunnel_layers": [{"type": "socks5", "host": "192.0.2.10", "port": 2235}]}
+
+// SSH hop only
+{"tunnel_layers": [{"type": "ssh", "host": "bastion.com", "user": "admin", "password": "..."}]}
+
+// SOCKS5 underlay + SSH (the 浙工业 / zgy pattern):
+// local → SOCKS5 proxy → SSH gateway → target service
+{"tunnel_layers": [
+  {"type": "socks5", "host": "192.0.2.10", "port": 2235},
+  {"type": "ssh",    "host": "127.0.0.1", "port": 3203, "user": "admin", "password": "..."}
+]}
+
+// SSH multi-hop (Client → Bastion1 → Bastion2 → Target)
+{"tunnel_layers": [
+  {"type": "ssh", "host": "b1.com", "user": "admin", "password": "..."},
+  {"type": "ssh", "host": "b2.com", "user": "admin", "key_path": "/home/me/.ssh/id_rsa"}
+]}
+```
+
+Each SSH layer in `tunnel_layers` accepts: `host`, `port` (default 22), `user`, `password`, `key_path`.
+Each SOCKS5 layer accepts: `host`, `port` (default 1080), `user` (optional), `password` (optional).
+
+## SSH tunnel syntax (legacy, still works)
 
 ```json
 // Single hop
@@ -85,7 +121,9 @@ HTTP and SSH-direct have no profile/YAML — pass all fields explicitly.
 {"tunnel": "ssh", "ssh_jump": ["b1.com", "b2.com"], ...}
 ```
 
-All hops share the same `ssh_user` / `ssh_password` / `ssh_key_path` / `ssh_port` when using the string forms above. For chains where each hop needs different credentials, use the object form (MCP) or `--ssh-hop` (CLI).
+All hops share the same `ssh_user` / `ssh_password` / `ssh_key_path` / `ssh_port` when using the string forms above. For chains where each hop needs different credentials, use the object form (MCP) or `--hop` (CLI).
+
+Since Phase 21, `tunnel="ssh"` + `socks5_*` fields now compose (SOCKS5 underlay + SSH) instead of being rejected.
 
 ### Per-hop credentials (MCP)
 
@@ -103,23 +141,35 @@ optional and falls back to the top-level `ssh_user`/etc.
 }
 ```
 
-### Per-hop credentials (CLI)
+### Per-hop CLI (Phase 21+)
 
-Use `--ssh-hop` (repeatable) with a JSON object per hop. Mutually exclusive
-with `--ssh-jump`:
+Use `--hop` (repeatable, URL form) for the ordered layer stack. Mutually exclusive with legacy `--tunnel`/`--ssh-*`/`--socks5-*`:
 
 ```bash
-tools4a --tunnel=ssh \
-    --ssh-hop '{"host":"gateway.example.invalid","user":"admin","password":"not-a-real-password"}' \
-    --ssh-hop '{"host":"10.x.x.54","user":"xxjs","password":"not-a-real-password"}' \
-    mysql "SELECT 1" --host=db.example.invalid --user=app --password=secret
+# SOCKS5 underlay + SSH (the 浙工业 / zgy pattern)
+tools4a --hop 'socks5://192.0.2.10:2235' \
+        --hop 'ssh://admin:pass@192.0.2.20:22' \
+        mysql "SELECT 1" --host=192.0.2.30 --user=root --password=secret
+
+# SSH multi-hop with different per-hop keys
+tools4a --hop 'ssh://admin:not-a-real-password@gateway.example.invalid' \
+        --hop 'ssh://xxjs:pass@10.x.x.54:2222' \
+        mysql "SELECT 1" --host=db.example.invalid --user=app --password=secret
+
+# tunnel-serve: local TCP forward through SOCKS5 → SSH
+tools4a tunnel-serve --type tcp --listen 127.0.0.1:13306 \
+  --target-host 192.0.2.30 --target-port 3306 \
+  --hop 'socks5://192.0.2.10:2235' \
+  --hop 'ssh://admin:not-a-real-password@192.0.2.20:22'
 ```
+
+Note: special characters in URL userinfo must be percent-encoded (e.g. `@` → `%40`, `:` → `%3A`).
 
 For **`ssh_exec`** specifically: the TARGET creds (`user`, `password` / `key_path`, `port`) and the JUMP creds (`ssh_*`) are independent. The tool never infers one from the other — supply both even when they happen to be the same.
 
 For **`http_exec`** through SSH: TLS SNI / Host header / cert verification all use the URL's original hostname; the tunnel only redirects DNS to a local listener. HTTPS-via-tunnel works without TLS surgery.
 
-For **`ssh_exec` through SOCKS5**: set `tunnel="socks5"` + `socks5_host` / `socks5_port` (+ optional `socks5_user` / `socks5_password`). tools4a stands up a local Socks5ClientTunnel pointed at the SSH target, then runs the SSH handshake over it. The host-key warning still names the real target host (not `127.0.0.1`), and target credentials authenticate the SSH session as usual — the proxy only carries TCP.
+For **`ssh_exec` through SOCKS5**: use `tunnel_layers` with a `socks5` entry (or legacy `tunnel="socks5"` + `socks5_*` fields). tools4a routes the russh TCP dial through the SOCKS5 proxy via the connector chain. The host-key warning still names the real target host (not `127.0.0.1`), and target credentials authenticate the SSH session as usual — the proxy only carries TCP.
 
 ## Output mapping
 

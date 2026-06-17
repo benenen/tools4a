@@ -10,11 +10,12 @@ use crate::request::HttpRequestSpec;
 
 /// Send a single HTTP request through `tunnel`. The tunnel's endpoint is
 /// only consulted to override DNS for the URL's host — when the endpoint
-/// matches the URL host:port (i.e. DirectTunnel returning the same address),
-/// reqwest performs a normal DNS lookup. When the tunnel rewrote the address
-/// (i.e. SshTunnel returning 127.0.0.1:<local-port>), `resolve()` points the
-/// URL host at the tunnel's local listener while preserving Host header,
-/// TLS SNI, and cert verification against the original hostname.
+/// matches the URL host:port (i.e. a direct/no-op tunnel returning the
+/// same address), reqwest performs a normal DNS lookup. When the tunnel
+/// rewrote the address (i.e. a `LayeredTunnel` returning
+/// 127.0.0.1:<local-port>), `resolve()` points the URL host at the
+/// tunnel's local listener while preserving Host header, TLS SNI, and
+/// cert verification against the original hostname.
 pub async fn execute(
     mut tunnel: Box<dyn Tunnel>,
     url_host: String,

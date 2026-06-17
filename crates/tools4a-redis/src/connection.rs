@@ -77,7 +77,7 @@ mod tests {
     use tools4a_core::TunnelEndpoint;
 
     /// Minimal Tunnel impl so this lib's tests don't depend on
-    /// DirectTunnel (which lives in the bin crate).
+    /// any concrete tunnel impl from tools4a-core.
     struct TestTunnel {
         active: bool,
     }
