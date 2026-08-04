@@ -4,7 +4,6 @@
 //! target. Seven MCP tools share one orchestrator and one action
 //! dispatcher.
 //!
-//! See `docs/superpowers/plans/2026-05-14-tools-mcp-phase15-docker.md`.
 
 pub mod actions;
 pub mod connection;

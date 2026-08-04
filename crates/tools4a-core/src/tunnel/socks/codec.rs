@@ -647,9 +647,9 @@ mod tests {
     #[test]
     fn connect_request_picks_domain_atyp() {
         let out = write_connect_request("db.example.invalid", 3306).unwrap();
-        assert_eq!(out[0..5], [0x05, 0x01, 0x00, 0x03, 11]);
-        assert_eq!(&out[5..16], b"db.example.invalid");
-        assert_eq!(&out[16..18], &3306u16.to_be_bytes());
+        assert_eq!(out[0..5], [0x05, 0x01, 0x00, 0x03, 18]);
+        assert_eq!(&out[5..23], b"db.example.invalid");
+        assert_eq!(&out[23..25], &3306u16.to_be_bytes());
     }
 
     #[test]

@@ -2,7 +2,6 @@
 //! fork (branch `self`). Ten MCP tools — 6 read, 1 vector search, 3
 //! write (allow_write-gated).
 //!
-//! See `docs/superpowers/plans/2026-05-14-tools-mcp-phase18-milvus.md`.
 
 pub mod actions;
 pub mod connection;

@@ -60,8 +60,8 @@ description: Use when calling any of the eight tools4a MCP tools (`mysql_exec` /
 All tools also accept the same tunnel fields. The recommended new form uses `tunnel_layers` (ordered, composable):
 ```json
 "tunnel_layers": [
-  {"type": "socks5", "host": "192.0.2.10", "port": 2235},
-  {"type": "ssh",    "host": "127.0.0.1", "port": 3203, "user": "admin", "password": "..."}
+  {"type": "socks5", "host": "192.0.2.10", "port": 1080},
+  {"type": "ssh",    "host": "192.0.2.20", "port": 22, "user": "admin", "password": "..."}
 ]
 ```
 Legacy flat fields still work and are lowered to layers automatically:
@@ -87,8 +87,8 @@ HTTP and SSH-direct have no profile/YAML — pass all fields explicitly.
 The preferred form for any tunnel chain — whether a single hop, multi-hop, SOCKS5 underlay + SSH, or just SSH — is `tunnel_layers` (an ordered list of layers, local→target):
 
 ```json
-// SOCKS5 proxy only (e.g. reach a service behind 192.0.2.10:2235)
-{"tunnel_layers": [{"type": "socks5", "host": "192.0.2.10", "port": 2235}]}
+// SOCKS5 proxy only (e.g. reach a service behind 192.0.2.10:1080)
+{"tunnel_layers": [{"type": "socks5", "host": "192.0.2.10", "port": 1080}]}
 
 // SSH hop only
 {"tunnel_layers": [{"type": "ssh", "host": "bastion.com", "user": "admin", "password": "..."}]}
@@ -96,8 +96,8 @@ The preferred form for any tunnel chain — whether a single hop, multi-hop, SOC
 // SOCKS5 underlay + SSH (the 浙工业 / zgy pattern):
 // local → SOCKS5 proxy → SSH gateway → target service
 {"tunnel_layers": [
-  {"type": "socks5", "host": "192.0.2.10", "port": 2235},
-  {"type": "ssh",    "host": "127.0.0.1", "port": 3203, "user": "admin", "password": "..."}
+  {"type": "socks5", "host": "192.0.2.10", "port": 1080},
+  {"type": "ssh",    "host": "192.0.2.20", "port": 22, "user": "admin", "password": "..."}
 ]}
 
 // SSH multi-hop (Client → Bastion1 → Bastion2 → Target)
@@ -136,7 +136,7 @@ optional and falls back to the top-level `ssh_user`/etc.
   "tunnel": "ssh",
   "ssh_jump": [
     {"host": "gateway.example.invalid", "user": "admin", "password": "not-a-real-password"},
-    {"host": "10.x.x.54",    "user": "xxjs",  "password": "not-a-real-password", "port": 2222}
+    {"host": "target.example.invalid",    "user": "target-user",  "password": "not-a-real-target-password", "port": 2222}
   ]
 }
 ```
@@ -147,19 +147,19 @@ Use `--hop` (repeatable, URL form) for the ordered layer stack. Mutually exclusi
 
 ```bash
 # SOCKS5 underlay + SSH (the 浙工业 / zgy pattern)
-tools4a --hop 'socks5://192.0.2.10:2235' \
+tools4a --hop 'socks5://192.0.2.10:1080' \
         --hop 'ssh://admin:pass@192.0.2.20:22' \
-        mysql "SELECT 1" --host=192.0.2.30 --user=root --password=secret
+        mysql "SELECT 1" --host=db.example.invalid --user=root --password=secret
 
 # SSH multi-hop with different per-hop keys
 tools4a --hop 'ssh://admin:not-a-real-password@gateway.example.invalid' \
-        --hop 'ssh://xxjs:pass@10.x.x.54:2222' \
+        --hop 'ssh://target-user:pass@target.example.invalid:2222' \
         mysql "SELECT 1" --host=db.example.invalid --user=app --password=secret
 
 # tunnel-serve: local TCP forward through SOCKS5 → SSH
 tools4a tunnel-serve --type tcp --listen 127.0.0.1:13306 \
-  --target-host 192.0.2.30 --target-port 3306 \
-  --hop 'socks5://192.0.2.10:2235' \
+  --target-host db.example.invalid --target-port 3306 \
+  --hop 'socks5://192.0.2.10:1080' \
   --hop 'ssh://admin:not-a-real-password@192.0.2.20:22'
 ```
 

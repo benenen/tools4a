@@ -428,7 +428,7 @@ mod tests {
         let cli = parse(&[
             "--tunnel=socks5",
             "--socks5-host=p",
-            "--socks5-port=2235",
+            "--socks5-port=1080",
             "--socks5-user=alice",
             "--socks5-password=s3cret",
         ]);
@@ -440,7 +440,7 @@ mod tests {
                 password,
                 ..
             } => {
-                assert_eq!(*port, 2235);
+                assert_eq!(*port, 1080);
                 assert_eq!(user.as_deref(), Some("alice"));
                 assert_eq!(password.as_deref(), Some("s3cret"));
             }
@@ -477,7 +477,7 @@ mod tests {
             "--ssh-jump=bastion.com",
             "--ssh-user=u",
             "--socks5-host=192.0.2.10",
-            "--socks5-port=2235",
+            "--socks5-port=1080",
         ]);
         let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
         assert_eq!(cfg.layers.len(), 2);
@@ -486,7 +486,7 @@ mod tests {
         match &cfg.layers[0] {
             TunnelLayer::Socks5 { host, port, .. } => {
                 assert_eq!(host, "192.0.2.10");
-                assert_eq!(*port, 2235);
+                assert_eq!(*port, 1080);
             }
             other => panic!("expected socks5 underlay, got {other:?}"),
         }
@@ -504,7 +504,7 @@ mod tests {
             "--tunnel=ssh",
             "--ssh-jump=bastion.com",
             "--ssh-user=u",
-            "--socks5-port=2235",
+            "--socks5-port=1080",
         ]);
         let err = cli_to_tunnel_config(&cli).unwrap_err();
         assert!(matches!(err, Error::Config(ref m) if m.contains("--socks5-host")));
@@ -514,7 +514,7 @@ mod tests {
     fn hop_socks5_then_ssh_builds_layered() {
         let cli = parse(&[
             "--hop",
-            "socks5://192.0.2.10:2235",
+            "socks5://192.0.2.10:1080",
             "--hop",
             "ssh://admin:not-a-real-password@192.0.2.20:22",
         ]);
@@ -525,14 +525,14 @@ mod tests {
         match &cfg.layers[0] {
             TunnelLayer::Socks5 { host, port, .. } => {
                 assert_eq!(host, "192.0.2.10");
-                assert_eq!(*port, 2235);
+                assert_eq!(*port, 1080);
             }
             other => panic!("expected socks5, got {other:?}"),
         }
         match &cfg.layers[1] {
             TunnelLayer::SshHop(h) => {
-                assert_eq!(h.host, "127.0.0.1");
-                assert_eq!(h.port, 3203);
+                assert_eq!(h.host, "192.0.2.20");
+                assert_eq!(h.port, 22);
                 assert_eq!(h.user, "admin");
                 assert_eq!(h.password.as_deref(), Some("not-a-real-password"));
             }
@@ -563,7 +563,10 @@ mod tests {
         assert_eq!(ssh_jumps.len(), 1);
         assert_eq!(ssh_jumps[0].host, "gw");
         assert_eq!(ssh_jumps[0].user, "admin");
-        assert_eq!(ssh_jumps[0].password.as_deref(), Some("not-a-real-password"));
+        assert_eq!(
+            ssh_jumps[0].password.as_deref(),
+            Some("not-a-real-password")
+        );
         assert_eq!(ssh_jumps[0].port, 2222);
     }
 
@@ -574,13 +577,13 @@ mod tests {
             "--ssh-hop",
             r#"{"host":"gw","user":"admin","password":"pw1"}"#,
             "--ssh-hop",
-            r#"{"host":"54","user":"xxjs","password":"pw2"}"#,
+            r#"{"host":"54","user":"target-user","password":"pw2"}"#,
         ]);
         let cfg = cli_to_tunnel_config(&cli).unwrap().unwrap();
         let ssh_jumps = cfg.ssh_jumps().expect("all-ssh");
         assert_eq!(ssh_jumps.len(), 2);
         assert_eq!(ssh_jumps[0].user, "admin");
-        assert_eq!(ssh_jumps[1].user, "xxjs");
+        assert_eq!(ssh_jumps[1].user, "target-user");
     }
 
     #[test]
@@ -589,7 +592,7 @@ mod tests {
             "--tunnel=ssh",
             "--ssh-jump=gw",
             "--ssh-hop",
-            r#"{"host":"54","user":"xxjs"}"#,
+            r#"{"host":"54","user":"target-user"}"#,
         ]);
         let err = cli_to_tunnel_config(&cli).unwrap_err();
         assert!(matches!(err, Error::Config(ref m) if m.contains("mutually exclusive")));
@@ -612,7 +615,7 @@ mod hop_tests {
 
     #[test]
     fn parse_socks5_hop_no_auth() {
-        let l = parse_hop_url("socks5://192.0.2.10:2235").unwrap();
+        let l = parse_hop_url("socks5://192.0.2.10:1080").unwrap();
         match l {
             TunnelLayer::Socks5 {
                 host,
@@ -621,7 +624,7 @@ mod hop_tests {
                 password,
             } => {
                 assert_eq!(host, "192.0.2.10");
-                assert_eq!(port, 2235);
+                assert_eq!(port, 1080);
                 assert!(user.is_none() && password.is_none());
             }
             _ => panic!(),
@@ -642,14 +645,14 @@ mod hop_tests {
 
     #[test]
     fn parse_ssh_hop_with_percent_encoded_password() {
-        // not-a-real-password -> not-a-real-password
-        let l = parse_hop_url("ssh://admin:not-a-real-password@192.0.2.20:22").unwrap();
+        // not-a-real%21password -> not-a-real!password
+        let l = parse_hop_url("ssh://admin:not-a-real%21password@192.0.2.20:22").unwrap();
         match l {
             TunnelLayer::SshHop(h) => {
-                assert_eq!(h.host, "127.0.0.1");
-                assert_eq!(h.port, 3203);
+                assert_eq!(h.host, "192.0.2.20");
+                assert_eq!(h.port, 22);
                 assert_eq!(h.user, "admin");
-                assert_eq!(h.password.as_deref(), Some("not-a-real-password"));
+                assert_eq!(h.password.as_deref(), Some("not-a-real!password"));
             }
             _ => panic!(),
         }
@@ -657,7 +660,7 @@ mod hop_tests {
 
     #[test]
     fn parse_ssh_hop_key_via_query() {
-        let l = parse_hop_url("ssh://ubuntu@10.0.0.5?key=/home/me/.ssh/id_ed25519").unwrap();
+        let l = parse_hop_url("ssh://ubuntu@192.0.2.30?key=/home/me/.ssh/id_ed25519").unwrap();
         match l {
             TunnelLayer::SshHop(h) => {
                 assert_eq!(h.port, 22);
@@ -671,7 +674,7 @@ mod hop_tests {
 
     #[test]
     fn parse_hop_rejects_missing_scheme() {
-        assert!(parse_hop_url("192.0.2.10:2235").is_err());
+        assert!(parse_hop_url("192.0.2.10:1080").is_err());
     }
 
     #[test]
@@ -682,7 +685,7 @@ mod hop_tests {
 
     #[test]
     fn parse_ssh_hop_without_user_errors() {
-        let err = parse_hop_url("ssh://10.0.0.5:22").unwrap_err();
+        let err = parse_hop_url("ssh://192.0.2.30:22").unwrap_err();
         assert!(matches!(err, Error::Config(ref m) if m.contains("ssh needs a user")));
     }
 }

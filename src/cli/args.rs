@@ -839,7 +839,7 @@ mod tests {
             "tools4a",
             "--tunnel=socks5",
             "--socks5-host=192.0.2.10",
-            "--socks5-port=2235",
+            "--socks5-port=1080",
             "--socks5-user=alice",
             "--socks5-password=s3cret",
             "mysql",
@@ -847,7 +847,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.socks5.socks5_host.as_deref(), Some("192.0.2.10"));
-        assert_eq!(cli.socks5.socks5_port, Some(2235));
+        assert_eq!(cli.socks5.socks5_port, Some(1080));
         assert_eq!(cli.socks5.socks5_user.as_deref(), Some("alice"));
         assert_eq!(cli.socks5.socks5_password.as_deref(), Some("s3cret"));
     }
@@ -875,14 +875,14 @@ mod tests {
             "--ssh-hop",
             r#"{"host":"gw","user":"admin","password":"pw1"}"#,
             "--ssh-hop",
-            r#"{"host":"54","user":"xxjs","password":"pw2"}"#,
+            r#"{"host":"target.example.invalid","user":"target-user","password":"not-a-real-target-password"}"#,
             "mysql",
             "SELECT 1",
         ])
         .unwrap();
         assert_eq!(cli.ssh.ssh_hop.len(), 2);
         assert!(cli.ssh.ssh_hop[0].contains("admin"));
-        assert!(cli.ssh.ssh_hop[1].contains("xxjs"));
+        assert!(cli.ssh.ssh_hop[1].contains("target-user"));
     }
 
     #[test]

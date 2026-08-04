@@ -5,7 +5,6 @@
 //! - `rabbitmq_list_bindings`
 //! - `rabbitmq_overview`
 //!
-//! See `docs/superpowers/plans/2026-05-14-tools-mcp-phase17-rabbitmq.md`.
 
 pub mod actions;
 pub mod connection;
