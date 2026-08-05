@@ -45,6 +45,10 @@ pub struct MysqlExecParams {
     pub password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    /// Saved MySQL connection profile name or alias from
+    /// `~/.config/tools4a/config.toml`. Call `profiles_list` first when
+    /// the user names an environment but its canonical profile is unknown.
+    /// Do not also pass host/password/tunnel fields when the profile is enough.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,9 +99,11 @@ pub struct MysqlMcp;
 #[async_trait]
 impl McpTool for MysqlMcp {
     const NAME: &'static str = "mysql_exec";
-    const DESCRIPTION: &'static str = "Execute a MySQL query, optionally through an SSH jump host. \
-         Reads are allowed by default; writes (INSERT/UPDATE/DELETE/DDL) require allow_write=true. \
-         Same connection options as the `tools4a mysql` CLI subcommand.";
+    const DESCRIPTION: &'static str = "Execute MySQL SQL for schema inspection, data queries, \
+         diagnostics, and approved writes. Use this tool instead of ssh_exec or docker_exec \
+         whenever the target is MySQL. Prefer a saved profile name or alias; call profiles_list \
+         first when the environment mapping is unknown. Direct connections and configured \
+         tunnels are supported. Reads are allowed by default; writes require allow_write=true.";
     type Params = MysqlExecParams;
 
     async fn invoke(params: MysqlExecParams) -> Result<ExecutionResult> {
@@ -130,9 +136,8 @@ fn params_to_config(p: &MysqlExecParams, toml: Option<TomlConfig>) -> Result<Con
                 "profile '{profile_name}' requested but no ~/.config/tools4a/config.toml found"
             ))
         })?;
-        let profile_cfg = toml_config.profiles.get(profile_name).ok_or_else(|| {
-            Error::Config(format!("profile '{profile_name}' not found in config.toml"))
-        })?;
+        let (_, profile_cfg) =
+            toml_config.resolve_profile(profile_name, Some(ServiceType::Mysql))?;
         configs.push(profile_to_config(profile_cfg));
     }
 
@@ -241,6 +246,29 @@ mod tests {
         };
         let cfg = params_to_config(&p, None).unwrap();
         assert_eq!(cfg.timeout_secs, Some(7));
+    }
+
+    #[test]
+    fn profile_alias_selects_saved_mysql_connection() {
+        let params = MysqlExecParams {
+            profile: Some("114".into()),
+            ..empty_params()
+        };
+        let toml: TomlConfig = serde_json::from_value(serde_json::json!({
+            "profiles": {
+                "mysql114": {
+                    "type": "mysql",
+                    "host": "db.example.invalid",
+                    "user": "reader",
+                    "aliases": ["114", "114 mysql"]
+                }
+            }
+        }))
+        .unwrap();
+
+        let cfg = params_to_config(&params, Some(toml)).unwrap();
+        assert_eq!(cfg.host.as_deref(), Some("db.example.invalid"));
+        assert_eq!(cfg.user.as_deref(), Some("reader"));
     }
 
     #[test]

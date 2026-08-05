@@ -11,7 +11,10 @@ use rmcp::{
 };
 use tools4a_browser::{BrowserExecParams, BrowserMcp};
 use tools4a_clickhouse::{ClickhouseExecParams, ClickhouseMcp};
-use tools4a_core::{ExecutionResult, McpTool};
+use tools4a_core::{
+    ExecutionResult, McpTool,
+    config::{ProfilesListMcp, ProfilesListParams},
+};
 use tools4a_docker::{
     DockerExecMcp, DockerExecParams, DockerInspectMcp, DockerInspectParams, DockerLogsMcp,
     DockerLogsParams, DockerPsMcp, DockerPsParams, DockerRestartMcp, DockerRestartParams,
@@ -194,7 +197,17 @@ impl ToolsMcpServer {
     }
 
     #[tool(
-        description = "Execute a MySQL query, optionally through an SSH jump host. Reads are allowed by default; writes (INSERT/UPDATE/DELETE/DDL) require allow_write=true. Same connection options as the `tools4a mysql` CLI subcommand."
+        description = "List saved tools4a connection profile names, service types, and aliases. Use this before a service tool when the user names an environment but the canonical profile is unknown. Never returns connection details or credentials. Read-only."
+    )]
+    async fn profiles_list(
+        &self,
+        Parameters(params): Parameters<ProfilesListParams>,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        into_toon_call_result(ProfilesListMcp::invoke(params).await)
+    }
+
+    #[tool(
+        description = "Execute MySQL SQL for schema inspection, data queries, diagnostics, and approved writes. Use this tool instead of ssh_exec or docker_exec whenever the target is MySQL. Prefer a saved profile name or alias; call profiles_list first when the environment mapping is unknown. Direct connections and configured tunnels are supported. Reads are allowed by default; writes require allow_write=true."
     )]
     async fn mysql_exec(
         &self,
@@ -492,13 +505,15 @@ impl ToolsMcpServer {
 impl ServerHandler for ToolsMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "tools4a: unified MySQL / PostgreSQL / ClickHouse / Redis / MongoDB / \
-             HTTP / SSH / Browser tools with optional SSH tunneling (browser \
-             tunnel is direct-only in Phase 1; SOCKS via SSH lands in Phase 2). \
-             Database reads are allowed by default; writes require \
-             allow_write=true. Connection params can come from a TOML profile \
-             (~/.config/tools4a/config.toml), a YAML file, or be supplied \
-             directly in the tool call.",
+            "tools4a exposes 31 tools for profiles, MySQL, PostgreSQL, ClickHouse, Redis, \
+             MongoDB, HTTP, SSH, Browser, Docker, Milvus, and RabbitMQ. For service data \
+             requests, prefer the dedicated service tool over shelling through ssh_exec or \
+             docker_exec. When the user names an environment but its canonical connection \
+             profile is unknown, call profiles_list, then pass the returned profile name or \
+             alias to the service tool. profiles_list never returns connection details or \
+             credentials. Database reads are allowed by default; writes require \
+             allow_write=true. All service tools support direct connections and composable \
+             tunnel layers where applicable.",
         )
     }
 }

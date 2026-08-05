@@ -119,9 +119,8 @@ fn params_to_config(p: &ClickhouseExecParams, toml: Option<TomlConfig>) -> Resul
                 "profile '{profile_name}' requested but no ~/.config/tools4a/config.toml found"
             ))
         })?;
-        let profile_cfg = toml_config.profiles.get(profile_name).ok_or_else(|| {
-            Error::Config(format!("profile '{profile_name}' not found in config.toml"))
-        })?;
+        let (_, profile_cfg) =
+            toml_config.resolve_profile(profile_name, Some(ServiceType::Clickhouse))?;
         configs.push(profile_to_config(profile_cfg));
     }
 

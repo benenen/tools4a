@@ -99,11 +99,11 @@ without `--allow-write`.
 
 ```bash
 # Direct connection (read-only by default)
-tools4a mysql "SELECT * FROM users" --host=localhost --user=root --password=secret
+tools4a mysql "SELECT * FROM users" --host=localhost --user=root --password=not-a-real-password
 
 # Write — requires --allow-write
 tools4a mysql "INSERT INTO users (name) VALUES ('alice')" \
-  --host=localhost --user=root --password=secret --allow-write
+  --host=localhost --user=root --password=not-a-real-password --allow-write
 
 # Using YAML config
 tools4a --config=mysql.yaml mysql "SELECT * FROM users"
@@ -112,53 +112,53 @@ tools4a --config=mysql.yaml mysql "SELECT * FROM users"
 tools4a mysql "SELECT * FROM users" --profile=prod
 
 # Through a single SSH jump
-tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-password=secret \
-  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=admin --ssh-password=not-a-real-jump-password \
+  mysql --host=mysql.example.invalid --user=root --password=not-a-real-db-password "SELECT 1"
 
 # Through two SSH jumps (comma-separated; all share --ssh-user/--ssh-password)
-tools4a --tunnel=ssh --ssh-jump=bastion1.com,bastion2.com --ssh-user=admin \
-  --ssh-key-path=~/.ssh/jump_key \
-  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+tools4a --tunnel=ssh --ssh-jump=bastion1.example.invalid,bastion2.example.invalid --ssh-user=admin \
+  --ssh-key-path=/path/to/not-a-real-jump-key \
+  mysql --host=mysql.example.invalid --user=root --password=not-a-real-db-password "SELECT 1"
 
 # Through an external SOCKS5 proxy
 tools4a --tunnel=socks5 --socks5-host=192.0.2.10 --socks5-port=2235 \
-  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+  mysql --host=mysql.example.invalid --user=root --password=not-a-real-db-password "SELECT 1"
 
 # Through an external SOCKS5 proxy with RFC 1929 user/pass auth
-tools4a --tunnel=socks5 --socks5-host=proxy.internal --socks5-user=alice \
-  --socks5-password=s3cret \
-  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+tools4a --tunnel=socks5 --socks5-host=proxy.example.invalid --socks5-user=alice \
+  --socks5-password=not-a-real-proxy-password \
+  mysql --host=mysql.example.invalid --user=root --password=not-a-real-db-password "SELECT 1"
 
 # Composable --hop (Phase 21): SOCKS5 underlay → SSH → target (the canonical chain)
 tools4a --hop 'socks5://192.0.2.10:2235' \
-        --hop 'ssh://admin:pass@gateway.internal:22' \
-  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+        --hop 'ssh://admin:not-a-real-password@gateway.example.invalid:22' \
+  mysql --host=mysql.example.invalid --user=root --password=not-a-real-db-password "SELECT 1"
 
 # Composable --hop: SSH multi-hop with per-hop credentials
-tools4a --hop 'ssh://admin:pass@bastion1.com' \
-        --hop 'ssh://dbuser:pass@bastion2.internal' \
-  mysql --host=mysql.internal --user=root --password=dbpass "SELECT 1"
+tools4a --hop 'ssh://admin:not-a-real-password@bastion1.example.invalid' \
+        --hop 'ssh://dbuser:not-a-real-password@bastion2.example.invalid' \
+  mysql --host=mysql.example.invalid --user=root --password=not-a-real-db-password "SELECT 1"
 
 # tunnel-serve: local TCP port-forward through SOCKS5 → SSH (Phase 21)
 tools4a tunnel-serve --type tcp --listen 127.0.0.1:13306 \
-  --target-host mysql.internal --target-port 3306 \
+  --target-host mysql.example.invalid --target-port 3306 \
   --hop 'socks5://192.0.2.10:2235' \
-  --hop 'ssh://admin:pass@gateway.internal:22'
+  --hop 'ssh://admin:not-a-real-password@gateway.example.invalid:22'
 ```
 
 ### PostgreSQL
 
 ```bash
 # Direct connection (read-only)
-tools4a pgsql "SELECT * FROM users LIMIT 5" --host=localhost --user=postgres --password=secret --database=myapp
+tools4a pgsql "SELECT * FROM users LIMIT 5" --host=localhost --user=postgres --password=not-a-real-password --database=myapp
 
 # Write — requires --allow-write
 tools4a pgsql "DELETE FROM events WHERE created_at < now() - interval '30 days'" \
-  --host=localhost --user=postgres --password=secret --database=myapp --allow-write
+  --host=localhost --user=postgres --password=not-a-real-password --database=myapp --allow-write
 
 # Through an SSH jump
-tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-key-path=~/.ssh/id_rsa \
-  pgsql --host=pg.internal --user=app --password=app_pwd --database=myapp "SELECT NOW()"
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=admin --ssh-key-path=/path/to/not-a-real-key \
+  pgsql --host=pgsql.example.invalid --user=app --password=not-a-real-password --database=myapp "SELECT NOW()"
 
 # Using a TOML profile
 tools4a pgsql "SELECT count(*) FROM events" --profile=prod-postgres
@@ -175,12 +175,12 @@ tools4a mongo '{"find":"users","filter":{"active":true},"limit":5}' \
 
 # insert (write — requires --allow-write)
 tools4a mongo '{"insert":"events","documents":[{"type":"signup","ts":1}]}' \
-  --host=mongo.internal --user=app --password=secret --database=analytics \
+  --host=mongo.example.invalid --user=app --password=not-a-real-password --database=analytics \
   --allow-write
 
 # Through an SSH jump
-tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-password=jpwd \
-  mongo '{"listCollections":1}' --host=mongo.internal --database=admin
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=admin --ssh-password=not-a-real-jump-password \
+  mongo '{"listCollections":1}' --host=mongo.example.invalid --database=admin
 ```
 
 ### Redis
@@ -190,11 +190,11 @@ tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-password=jpwd
 tools4a redis "GET mykey" --host=localhost --port=6379
 
 # With password + db
-tools4a redis "HGETALL myhash" --host=localhost --password=secret --db=2
+tools4a redis "HGETALL myhash" --host=localhost --password=not-a-real-password --db=2
 
 # Through an SSH jump
-tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-password=secret \
-  redis "INFO replication" --host=redis.internal --password=cache_pwd
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=admin --ssh-password=not-a-real-jump-password \
+  redis "INFO replication" --host=redis.example.invalid --password=not-a-real-cache-password
 
 # Using a TOML profile
 tools4a redis "KEYS *" --profile=prod-cache
@@ -212,28 +212,28 @@ tools4a http POST https://api.example.com/users \
   --bearer "$API_TOKEN"
 
 # Through an SSH jump to an internal HTTPS service
-tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=admin --ssh-password=secret \
-  http GET https://internal-api.local/health
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=admin --ssh-password=not-a-real-jump-password \
+  http GET https://internal-api.example.invalid/health
 
 # Self-signed cert internal service (show full status + headers + body)
-tools4a http GET https://10.0.0.5/api --insecure -i
+tools4a http GET https://192.0.2.5/api --insecure -i
 ```
 
 ### SSH (remote command execution)
 
 ```bash
 # Direct connection
-tools4a ssh "uname -a" --host=server.com --user=admin --key-path=~/.ssh/id_rsa
+tools4a ssh "uname -a" --host=server.example.invalid --user=admin --key-path=/path/to/not-a-real-key
 
 # With password
-tools4a ssh "df -h" --host=10.0.0.5 --user=root --password=secret
+tools4a ssh "df -h" --host=192.0.2.5 --user=root --password=not-a-real-password
 
 # Through an SSH jump (jump creds are SEPARATE from target creds)
-tools4a --tunnel=ssh --ssh-jump=bastion.com --ssh-user=jumper --ssh-password=jpwd \
-  ssh "systemctl status nginx" --host=internal-server --user=admin --key-path=~/.ssh/target_key
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=jumper --ssh-password=not-a-real-jump-password \
+  ssh "systemctl status nginx" --host=server.example.invalid --user=admin --key-path=/path/to/not-a-real-target-key
 
 # Show structured output (exit_code/stdout/stderr table)
-tools4a ssh "false" --host=h --user=u --key-path=~/.ssh/k -i
+tools4a ssh "false" --host=server.example.invalid --user=user --key-path=/path/to/not-a-real-key -i
 ```
 
 By default `tools4a`'s exit code mirrors the remote command's exit code,
@@ -259,13 +259,13 @@ tools4a browser --session work open https://example.com
 tools4a browser snapshot --session work -i
 
 # Through an SSH bastion (tools4a binds a per-call SOCKS5 listener via LayeredTunnel Socks5Server)
-tools4a --tunnel=ssh --ssh-jump=bastion.example.com --ssh-user=admin \
-  browser open https://internal.local --session work
+tools4a --tunnel=ssh --ssh-jump=bastion.example.invalid --ssh-user=admin \
+  browser open https://internal.example.invalid --session work
 
 # Composable --hop for browser: SOCKS5 underlay → SSH bastion → browser
 tools4a --hop 'socks5://192.0.2.10:2235' \
-        --hop 'ssh://admin:pass@bastion.example.com' \
-  browser open https://internal.local --session work
+        --hop 'ssh://admin:not-a-real-password@bastion.example.invalid' \
+  browser open https://internal.example.invalid --session work
 ```
 
 `tools4a`'s exit code mirrors `agent-browser`'s, like the `ssh`
@@ -288,10 +288,12 @@ Run `tools4a` with no subcommand to start an MCP server over stdio:
 tools4a
 ```
 
-It exposes eight tools (`mysql_exec`, `pgsql_exec`, `clickhouse_exec`,
-`redis_exec`, `mongo_exec`, `http_exec`, `ssh_exec`, `browser_exec`) —
-one per service. Each tool accepts the same parameters as the
-corresponding CLI subcommand plus the shared tunnel fields. The
+It exposes 31 tools: one safe profile-discovery tool (`profiles_list`),
+eight service tools (`mysql_exec`, `pgsql_exec`, `clickhouse_exec`,
+`redis_exec`, `mongo_exec`, `http_exec`, `ssh_exec`, `browser_exec`),
+seven Docker tools, ten Milvus tools, and five RabbitMQ tools. The 30
+service/action tools accept their service parameters plus shared tunnel
+fields; `profiles_list` returns only profile names, types, and aliases. The
 preferred form (Phase 21) is `tunnel_layers` (an ordered JSON array of
 `{type:"socks5"|"ssh", host, port, user?, password?, key_path?}`);
 legacy flat fields (`tunnel`, `ssh_jump`, `ssh_user`, `ssh_password`,
@@ -319,7 +321,7 @@ Example MCP configuration entry (e.g. for Claude Desktop):
 
 This repo ships a Claude Code plugin (`.claude-plugin/plugin.json` +
 `.claude-plugin/marketplace.json` + `.mcp.json` + `skills/`). Once
-installed, Claude gets the eight service MCP tools plus the
+installed, Claude gets all 31 MCP tools plus the
 project-specific skills — all wired up automatically.
 
 Pick **one** of the two paths below.
@@ -348,7 +350,7 @@ To upgrade after pulling new commits, rebuild the binary
 
 #### Path B: Install as a plain MCP server (lighter)
 
-Gives you the eight MCP tools only (no skills). Useful if you don't want
+Gives you the 31 MCP tools only (no skills). Useful if you don't want
 plugin-level integration.
 
 ```bash
@@ -368,6 +370,7 @@ subcommand, so no extra flags are needed.
 #### What the plugin provides
 
 - **MCP tools** auto-registered via `.mcp.json`:
+  - `profiles_list` — discover canonical profile names and aliases without exposing connection details or credentials.
   - `mysql_exec` — run a MySQL query.
   - `pgsql_exec` — run a PostgreSQL query.
   - `clickhouse_exec` — run a ClickHouse SQL query (HTTP interface).
@@ -376,8 +379,9 @@ subcommand, so no extra flags are needed.
   - `http_exec` — send an HTTP request.
   - `ssh_exec` — run a shell command on a remote SSH server.
   - `browser_exec` — run an `agent-browser` subcommand (browser automation; requires the external `agent-browser` binary).
+  - Seven `docker_*`, ten `milvus_*`, and five `rabbitmq_*` tools for their respective services.
 - **Skills** that guide the assistant (Path A only):
-  - `tools4a-using` — consolidated guide for all eight tools: parameter shape per service, three-layer config priority (mysql + pgsql + clickhouse + redis + mongo), SSH tunnel syntax, output mapping, destructive-command list.
+  - `tools4a-using` — routing and safety guide for all 31 tools, including profile aliases, parameter shapes, config priority, tunnels, output mapping, and destructive-command confirmation.
   - `mysql-debugging` — diagnostic queries for common MySQL errors, locks, slow queries.
   - `ssh-bastion-checklist` — narrows down SSH-tunnel failures.
   - `browser-using` — agent-browser daemon model, session reuse, Phase 1 SOCKS workaround for SSH-routed browsing.
@@ -390,7 +394,7 @@ type: mysql
 host: localhost
 port: 3306
 user: root
-password: secret
+password: not-a-real-password
 database: mydb
 ```
 
@@ -398,11 +402,17 @@ database: mydb
 ```toml
 [profiles.prod]
 type = "mysql"
-host = "prod.example.com"
+aliases = ["production", "orders"]
+host = "prod.example.invalid"
 port = 3306
 user = "app_user"
-password = "secret"
+password = "not-a-real-password"
 ```
+
+Profile names and aliases are routing metadata: each is limited to 128
+characters and may not contain control or bidirectional-formatting characters.
+A profile accepts at most 32 aliases. Within one service type, aliases and
+canonical profile names must be unique under ASCII case-folding.
 
 ## Development
 

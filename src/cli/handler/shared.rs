@@ -29,9 +29,8 @@ pub(super) fn build_config(
     // 1. Default TOML profile (if --profile=NAME and ~/.config/tools4a/config.toml exists)
     if let Some(profile_name) = &profile {
         if let Some(toml_config) = ConfigLoader::load_default_toml()? {
-            let profile_cfg = toml_config.profiles.get(profile_name).ok_or_else(|| {
-                Error::Config(format!("profile '{profile_name}' not found in config.toml"))
-            })?;
+            let (_, profile_cfg) =
+                toml_config.resolve_profile(profile_name, Some(service_type.clone()))?;
             configs.push(profile_to_config(profile_cfg));
         } else {
             return Err(Error::Config(format!(
@@ -77,9 +76,8 @@ pub(super) fn build_config_redis(
 
     if let Some(profile_name) = &profile {
         if let Some(toml_config) = ConfigLoader::load_default_toml()? {
-            let profile_cfg = toml_config.profiles.get(profile_name).ok_or_else(|| {
-                Error::Config(format!("profile '{profile_name}' not found in config.toml"))
-            })?;
+            let (_, profile_cfg) =
+                toml_config.resolve_profile(profile_name, Some(ServiceType::Redis))?;
             configs.push(profile_to_config(profile_cfg));
         } else {
             return Err(Error::Config(format!(

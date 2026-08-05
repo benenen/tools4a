@@ -1,14 +1,15 @@
 ---
 name: tools4a-using
-description: "Use when calling any of the 30 tools4a MCP tools: eight service tools (`mysql_exec`, `pgsql_exec`, `clickhouse_exec`, `redis_exec`, `mongo_exec`, `http_exec`, `ssh_exec`, `browser_exec`), seven `docker_*` tools, ten `milvus_*` tools, or five `rabbitmq_*` tools. Covers tool routing, parameter shapes, config priority, composable tunnels, output mapping, write gating, destructive-operation confirmation, and common errors."
+description: "Route user requests for saved profiles, MySQL/PostgreSQL/ClickHouse/Redis/MongoDB, HTTP/SSH/Browser, Docker, Milvus, or RabbitMQ to the 31 tools4a MCP tools. Covers aliases, parameters, tunnels, outputs, write gates, and destructive-action confirmation."
 ---
 
 # Using the tools4a MCP tools
 
-`tools4a` exposes 30 MCP tools. Internally every tool produces a `{columns, rows, affected_rows}` `ExecutionResult` and accepts the shared tunnel fields. On the MCP wire, `mysql_exec`, `pgsql_exec`, and `clickhouse_exec` default to TOON and accept `format="json"`; Redis, MongoDB, HTTP, SSH, and Browser return JSON text; all 22 `docker_*`, `milvus_*`, and `rabbitmq_*` tools return TOON text. Parse the returned text according to that family rather than assuming every tool returns a JSON object. MySQL, PostgreSQL, ClickHouse, Redis, and MongoDB additionally accept `profile` / `config` for 3-layer config merge; the other tools take connection fields directly. Browser requires the external `agent-browser` binary on the tools4a host.
+`tools4a` exposes 31 MCP tools. Internally every tool produces a `{columns, rows, affected_rows}` `ExecutionResult`. On the MCP wire, `mysql_exec`, `pgsql_exec`, and `clickhouse_exec` default to TOON and accept `format="json"`; Redis, MongoDB, HTTP, SSH, and Browser return JSON text; `profiles_list` plus all 22 `docker_*`, `milvus_*`, and `rabbitmq_*` tools return TOON text. Parse the returned text according to that family rather than assuming every tool returns a JSON object. MySQL, PostgreSQL, ClickHouse, Redis, and MongoDB additionally accept `profile` / `config` for 3-layer config merge; the other service tools take connection fields directly. Browser requires the external `agent-browser` binary on the tools4a host.
 
 | Family | Count | Tools | Required connection/action input |
 | --- | ---: | --- | --- |
+| Profile discovery | 1 | `profiles_list` | no input; returns only canonical name, service type, and aliases |
 | SQL / data services | 5 | `mysql_exec`, `pgsql_exec`, `clickhouse_exec`, `redis_exec`, `mongo_exec` | service action plus host/auth, or a configured profile |
 | HTTP / SSH / Browser | 3 | `http_exec`, `ssh_exec`, `browser_exec` | `method` + `url`; `command` + SSH target/auth; or browser `subcommand` |
 | Docker | 7 | `docker_ps`, `docker_inspect`, `docker_logs`, `docker_stats`, `docker_top`, `docker_exec`, `docker_restart` | local Docker socket by default; action-specific container/command fields |
@@ -20,6 +21,9 @@ Direct connection defaults: Docker uses `docker_host=unix:///var/run/docker.sock
 ## Tool input shapes
 
 ```json
+// profiles_list — call first when an environment name is known but its canonical profile is not
+{}
+
 // mysql_exec
 { "query": "SELECT 1", "profile": "prod", "database": "myapp" }
 { "query": "SELECT 1", "host": "db.example.invalid", "user": "alice", "password": "not-a-real-password" }
@@ -70,7 +74,7 @@ Direct connection defaults: Docker uses `docker_host=unix:///var/run/docker.sock
 { "host": "rabbitmq.example.invalid", "user": "monitor", "password": "not-a-real-password", "vhost": "/", "queue": "jobs", "count": 1, "truncate_bytes": 4096 } // rabbitmq_get_messages
 ```
 
-All 30 tools also accept the shared tunnel fields. The recommended form uses `tunnel_layers` (ordered, composable):
+The 30 service/action tools accept the shared tunnel fields; `profiles_list` does not. The recommended form uses `tunnel_layers` (ordered, composable):
 ```json
 "tunnel_layers": [
   {"type": "socks5", "host": "192.0.2.10", "port": 1080},
@@ -93,7 +97,7 @@ Docker defaults to `unix:///var/run/docker.sock`. For a remote Unix socket, set 
 
 ## Three-layer config priority (mysql / pgsql / clickhouse / redis / mongo)
 
-Low → high: TOML profile (`~/.config/tools4a/config.toml [profiles.<NAME>]`) → YAML file (`config: /path.yaml`) → explicit fields. Each layer fills `Option<...>` fields; later layers overwrite. Use a profile to avoid pasting credentials repeatedly; override per call only what differs (e.g. `database`, `query`).
+Low → high: TOML profile (`~/.config/tools4a/config.toml [profiles.<NAME>]`) → YAML file (`config: /path.yaml`) → explicit fields. Each layer fills `Option<...>` fields; later layers overwrite. A profile may define `aliases = ["prod", "orders"]`; canonical names win, and aliases are scoped by service type. Call `profiles_list` when the user names an environment but the canonical profile is unknown. It returns only `name`, `type`, and `aliases`, never connection details or credentials. Use a profile to avoid pasting credentials repeatedly; override per call only what differs (e.g. `database`, `query`).
 
 HTTP, SSH-direct, Browser, Docker, Milvus, and RabbitMQ have no profile/YAML — pass all fields explicitly.
 
