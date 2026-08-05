@@ -5,7 +5,7 @@ description: "Use when calling any of the 30 tools4a MCP tools: eight service to
 
 # Using the tools4a MCP tools
 
-`tools4a` exposes 30 MCP tools. Internally every tool produces a `{columns, rows, affected_rows}` `ExecutionResult` and accepts the shared tunnel fields. On the MCP wire, the original eight service tools return JSON text by default (SQL tools can request `format="toon"`), while all 22 `docker_*`, `milvus_*`, and `rabbitmq_*` tools return TOON text. Parse the returned text according to that family rather than assuming every tool returns a JSON object. MySQL, PostgreSQL, ClickHouse, Redis, and MongoDB additionally accept `profile` / `config` for 3-layer config merge; the other tools take connection fields directly. Browser requires the external `agent-browser` binary on the tools4a host.
+`tools4a` exposes 30 MCP tools. Internally every tool produces a `{columns, rows, affected_rows}` `ExecutionResult` and accepts the shared tunnel fields. On the MCP wire, `mysql_exec`, `pgsql_exec`, and `clickhouse_exec` default to TOON and accept `format="json"`; Redis, MongoDB, HTTP, SSH, and Browser return JSON text; all 22 `docker_*`, `milvus_*`, and `rabbitmq_*` tools return TOON text. Parse the returned text according to that family rather than assuming every tool returns a JSON object. MySQL, PostgreSQL, ClickHouse, Redis, and MongoDB additionally accept `profile` / `config` for 3-layer config merge; the other tools take connection fields directly. Browser requires the external `agent-browser` binary on the tools4a host.
 
 | Family | Count | Tools | Required connection/action input |
 | --- | ---: | --- | --- |
@@ -188,6 +188,13 @@ For **`http_exec`** through SSH: TLS SNI / Host header / cert verification all u
 For **`ssh_exec` through SOCKS5**: use `tunnel_layers` with a `socks5` entry (or legacy `tunnel="socks5"` + `socks5_*` fields). tools4a routes the russh TCP dial through the SOCKS5 proxy via the connector chain. The host-key warning still names the real target host (not `127.0.0.1`), and target credentials authenticate the SSH session as usual — the proxy only carries TCP.
 
 ## Output mapping
+
+For `mysql_exec`, `pgsql_exec`, and `clickhouse_exec`, distinguish serialization compression from row-level compression:
+
+- Default `format="toon"`, `include_ui=false`: return every row in TOON, typically using 30–60% fewer tokens than JSON; do not truncate or summarize rows.
+- `format="json"`, `include_ui=false`: return every row as pretty JSON; do not compress rows.
+- `include_ui=true`: keep the full result in the HTML UI resource, but compress the text sent to the LLM by row count: up to 20 rows stay complete; 21–100 return the first 20; 101–1000 return 10 evenly distributed samples plus statistics; more than 1000 return schema and statistics only.
+- `include_ui` defaults to `false`, so ordinary SQL calls use TOON format compression without row-level data loss.
 
 **mysql_exec** — standard `{columns, rows, affected_rows}`. DML returns empty rows + non-zero affected_rows.
 
